@@ -11,7 +11,7 @@ server = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 server.bind((HOST, PORT))
 
 MAX_PLAYERS = 10
-INACTIVE_TIMEOUT = 15
+INACTIVE_TIMEOUT = 60   # generous — dead spectators send a heartbeat every 2s
 
 # ─── MAP DIMENSIONS ──────────────────────────────────────────────────────────
 MAP_W = 3840
@@ -223,11 +223,11 @@ def broadcast_lobby():
             pass
 
 def check_all_ready():
-    """Auto-start if all active (non-spectating, non-kicked) players are ready (min 2)."""
+    """Auto-start if all lobby players (min 2, not kicked) are ready."""
     if game_phase != "lobby":
         return
     active = [p for p in players.values()
-              if not p.get("spectating", False) and p["name"] not in kicked_names]
+              if p["phase"] == "lobby" and p["name"] not in kicked_names]
     if len(active) < 2:
         return
     if all(p.get("ready", False) for p in active):
