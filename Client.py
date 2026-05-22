@@ -1,4 +1,3 @@
-
 import socket
 import threading
 import json
@@ -7,7 +6,7 @@ import math
 import os
 import random
 
-SERVER_IP = "10.165.234.223"
+SERVER_IP = "10.165.234.133"
 PORT = 5555
 
 client = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -177,7 +176,7 @@ BRAWLERS = {
         "outfit_color": (100, 50, 20),
         "emoji": "💥",
         "desc":  "5-pellet shotgun blast.",
-        "star":  "Pierce all pellets!",
+        "star":  "Place a shield wall!",
         "tag":   "BRUISER",
         "stat_labels": [("DMG", "22x5"), ("SPD", "8"), ("RATE", "Slow")],
     },
@@ -189,7 +188,7 @@ BRAWLERS = {
         "outfit_color": (20, 80, 60),
         "emoji": "🌀",
         "desc":  "Fast shurikens, moves quickly.",
-        "star":  "Extra speed burst!",
+        "star":  "Teleport forward!",
         "tag":   "ASSASSIN",
         "stat_labels": [("DMG", "18"), ("SPD", "16"), ("RATE", "Fast")],
     },
@@ -201,9 +200,46 @@ BRAWLERS = {
         "outfit_color": (30, 120, 30),
         "emoji": "💚",
         "desc":  "Regen 2 HP/sec passively.",
-        "star":  "Double regen rate!",
+        "star":  "Invincible 3 seconds!",
         "tag":   "SUPPORT",
         "stat_labels": [("DMG", "28"), ("SPD", "12"), ("RATE", "Med")],
+    },
+    # ── NEW BRAWLERS ──────────────────────────────────────────────────────────
+    "berserker": {
+        "weapon": "cannon",
+        "color":  (220,  50,  50), "accent": (255, 120,  80),
+        "skin_color": (210, 150,  80),
+        "hair_color": (180,  20,  20),
+        "outfit_color": (100,  20,  20),
+        "emoji": "⚡",
+        "desc":  "Dual-barrel cannon. Short range.",
+        "star":  "RAGE: speed + dmg boost!",
+        "tag":   "BERSERKER",
+        "stat_labels": [("DMG", "55x3"), ("SPD", "10"), ("RATE", "Med")],
+    },
+    "ghost": {
+        "weapon": "phantom",
+        "color":  (140, 180, 255), "accent": (200, 220, 255),
+        "skin_color": (200, 210, 240),
+        "hair_color": (100, 120, 200),
+        "outfit_color": (40,  50, 100),
+        "emoji": "👻",
+        "desc":  "Slow orbs that freeze enemies.",
+        "star":  "Shots pierce all walls!",
+        "tag":   "PHANTOM",
+        "stat_labels": [("DMG", "30"), ("SPD", "8"), ("RATE", "Med")],
+    },
+    "bomber": {
+        "weapon": "bomb",
+        "color":  (255, 180,  20), "accent": (255, 220, 100),
+        "skin_color": (230, 185, 110),
+        "hair_color": ( 80,  50,  10),
+        "outfit_color": (80,  60,  10),
+        "emoji": "💣",
+        "desc":  "Lobbed bombs with AoE blast.",
+        "star":  "Mega bombs — huge blast!",
+        "tag":   "DEMOLITION",
+        "stat_labels": [("DMG", "45 AoE"), ("SPD", "12"), ("RATE", "Slow")],
     },
 }
 
@@ -214,11 +250,14 @@ WEAPON_TO_BRAWLER = {
     "shotgun":  "tank",
     "shuriken": "ninja",
     "orb":      "healer",
+    "cannon":   "berserker",
+    "phantom":  "ghost",
+    "bomb":     "bomber",
     "ak47":     "sniper",
 }
 
 # ─── ANIMATION STATE ──────────────────────────────────────────────────────────
-player_anims = {}  # addr -> {walk_t, shoot_t, face_dir, last_x, last_y, hurt_t}
+player_anims = {}
 
 def get_anim(addr):
     if addr not in player_anims:
@@ -230,6 +269,7 @@ def get_anim(addr):
             "last_y": 0,
             "hurt_t": 0,
             "shoot_flash": 0,
+            "teleport_flash": 0,
         }
     return player_anims[addr]
 
@@ -260,6 +300,32 @@ def spawn_hit_particles(x, y, color):
             "r": random.randint(3, 7), "color": color,
         })
 
+def spawn_explosion_particles(x, y, radius=80):
+    count = 16
+    for i in range(count):
+        ang = random.uniform(0, math.pi * 2)
+        spd = random.uniform(3, 8)
+        col = random.choice([(255, 180, 30), (255, 100, 20), (255, 60, 10), (200, 200, 80)])
+        particles.append({
+            "x": x, "y": y,
+            "dx": math.cos(ang) * spd,
+            "dy": math.sin(ang) * spd,
+            "life": 1.0, "decay": 0.025,
+            "r": random.randint(4, 10), "color": col,
+        })
+    # Smoke ring
+    for i in range(8):
+        ang = math.pi * 2 / 8 * i
+        dist = radius * 0.6
+        particles.append({
+            "x": x + math.cos(ang) * dist,
+            "y": y + math.sin(ang) * dist,
+            "dx": math.cos(ang) * 1.5,
+            "dy": math.sin(ang) * 1.5,
+            "life": 0.8, "decay": 0.015,
+            "r": random.randint(6, 12), "color": (80, 80, 80),
+        })
+
 def update_draw_particles(surf):
     for p in particles[:]:
         p["x"] += p["dx"]
@@ -278,12 +344,12 @@ def update_draw_particles(surf):
 # ─── DETAILED BRAWLER DRAWING ─────────────────────────────────────────────────
 def draw_brawler_detailed(surf, brawler_name, cx, cy, alpha=255, scale=1.0,
                            starpower=False, alive=True, face_angle=0.0,
-                           walk_phase=0.0, shoot_flash=0, hurt_flash=0):
-    """Draw a detailed Brawl Stars-style character with full body."""
+                           walk_phase=0.0, shoot_flash=0, hurt_flash=0,
+                           invincible=False, rage=False, wallpierce=False,
+                           teleport_flash=0):
     bdata = BRAWLERS.get(brawler_name, BRAWLERS["sniper"])
 
     if not alive:
-        # Dead — grey X shape
         tmp = pygame.Surface((80, 80), pygame.SRCALPHA)
         col = (80, 80, 90, min(255, alpha))
         pygame.draw.line(tmp, col, (10, 10), (70, 70), 6)
@@ -291,14 +357,41 @@ def draw_brawler_detailed(surf, brawler_name, cx, cy, alpha=255, scale=1.0,
         surf.blit(tmp, (cx - 40, cy - 40))
         return
 
-    # Colors
     skin   = bdata["skin_color"]
     hair   = bdata["hair_color"]
     outfit = bdata["outfit_color"]
     accent_c = bdata["accent"]
     main_c   = bdata["color"]
 
-    # Flash overrides
+    # Special state overrides
+    if invincible:
+        now_t = pygame.time.get_ticks()
+        shield_pulse = int(40 + 30 * math.sin(now_t * 0.01))
+        glow_s = pygame.Surface((80, 80), pygame.SRCALPHA)
+        pygame.draw.circle(glow_s, (100, 200, 255, shield_pulse), (40, 40), 38)
+        surf.blit(glow_s, (cx - 40, cy - 40))
+
+    if rage:
+        now_t = pygame.time.get_ticks()
+        ra = int(60 + 40 * math.sin(now_t * 0.008))
+        gs = pygame.Surface((80, 80), pygame.SRCALPHA)
+        pygame.draw.circle(gs, (255, 60, 20, ra), (40, 40), 38)
+        surf.blit(gs, (cx - 40, cy - 40))
+        outfit = tuple(min(255, c + 60) for c in outfit)
+
+    if wallpierce:
+        now_t = pygame.time.get_ticks()
+        wa = int(40 + 30 * math.sin(now_t * 0.012))
+        gs2 = pygame.Surface((80, 80), pygame.SRCALPHA)
+        pygame.draw.circle(gs2, (140, 180, 255, wa), (40, 40), 38)
+        surf.blit(gs2, (cx - 40, cy - 40))
+
+    if teleport_flash > 0:
+        tf_a = min(220, teleport_flash * 20)
+        gst = pygame.Surface((80, 80), pygame.SRCALPHA)
+        pygame.draw.circle(gst, (40, 255, 180, tf_a), (40, 40), 36)
+        surf.blit(gst, (cx - 40, cy - 40))
+
     if hurt_flash > 0:
         blend = min(1.0, hurt_flash / 8)
         skin = tuple(int(s + (255 - s) * blend * 0.6) for s in skin)
@@ -308,13 +401,11 @@ def draw_brawler_detailed(surf, brawler_name, cx, cy, alpha=255, scale=1.0,
         blend = min(1.0, shoot_flash / 6)
         outfit = tuple(int(min(255, o + 60 * blend)) for o in outfit)
 
-    # Size
-    R = int(18 * scale)  # body radius
+    R = int(18 * scale)
     tmp = pygame.Surface((int(R*6), int(R*6)), pygame.SRCALPHA)
     ox = R * 3
     oy = R * 3
 
-    # Walk bobbing
     bob = int(math.sin(walk_phase) * 2 * scale)
     leg_swing = math.sin(walk_phase) * 0.4
 
@@ -327,7 +418,6 @@ def draw_brawler_detailed(surf, brawler_name, cx, cy, alpha=255, scale=1.0,
         tmp.blit(sh, (ox - R*2, oy + R + 2))
 
     def draw_outline_circle(x, y, r, color, width=2):
-        """Draw circle with dark outline for cartoon look."""
         pygame.draw.circle(tmp, (20, 15, 10, min(255, alpha)), (x, y), r + width)
         pygame.draw.circle(tmp, ac(color), (x, y), r)
 
@@ -340,108 +430,64 @@ def draw_brawler_detailed(surf, brawler_name, cx, cy, alpha=255, scale=1.0,
     draw_shadow()
 
     if brawler_name == "sniper":
-        # LISI-style: tall, slim, dark outfit with sniper rifle
-        # Legs (animated)
         lx1 = ox - int(R * 0.5) + int(leg_swing * R * 0.6)
         lx2 = ox + int(R * 0.5) - int(leg_swing * R * 0.6)
         boot_col = (40, 30, 20)
-        # left leg
-        pygame.draw.rect(tmp, (20, 15, 10, alpha),
-                         (lx1 - R//2 - 1, oy + R - 1, R, R + 3), border_radius=4)
-        pygame.draw.rect(tmp, ac(outfit), (lx1 - R//2, oy + R, R, R), border_radius=3)
-        pygame.draw.rect(tmp, ac(boot_col), (lx1 - R//2, oy + R*2 - 2, R, 6), border_radius=3)
-        # right leg
-        pygame.draw.rect(tmp, (20, 15, 10, alpha),
-                         (lx2 - R//2 - 1, oy + R - 1, R, R + 3), border_radius=4)
-        pygame.draw.rect(tmp, ac(outfit), (lx2 - R//2, oy + R, R, R), border_radius=3)
-        pygame.draw.rect(tmp, ac(boot_col), (lx2 - R//2, oy + R*2 - 2, R, 6), border_radius=3)
-
-        # Body / torso
+        for lx in [lx1, lx2]:
+            pygame.draw.rect(tmp, (20, 15, 10, alpha), (lx - R//2 - 1, oy + R - 1, R, R + 3), border_radius=4)
+            pygame.draw.rect(tmp, ac(outfit), (lx - R//2, oy + R, R, R), border_radius=3)
+            pygame.draw.rect(tmp, ac(boot_col), (lx - R//2, oy + R*2 - 2, R, 6), border_radius=3)
         draw_outline_rect((ox - R, oy - R//2 + bob, R*2, int(R*1.5)), outfit)
-        # Belt
         pygame.draw.rect(tmp, ac((80, 60, 30)), (ox - R, oy + R//2 + bob, R*2, R//3))
-
-        # Arms
         arm_ang = math.radians(face_angle)
-        # gun arm extended toward aim direction
         gun_len = int(R * 1.4)
         gx = ox + int(math.cos(arm_ang) * gun_len)
         gy = oy + bob + int(math.sin(arm_ang) * gun_len * 0.5)
         pygame.draw.line(tmp, (20, 15, 10, alpha), (ox, oy + bob), (gx, gy), R//2 + 2)
         pygame.draw.line(tmp, ac(skin), (ox, oy + bob), (gx, gy), R//2)
-        # Sniper rifle
         rifle_end_x = ox + int(math.cos(arm_ang) * R * 2.2)
         rifle_end_y = oy + bob + int(math.sin(arm_ang) * R * 0.8)
         pygame.draw.line(tmp, (15, 10, 5, alpha),
-                         (ox + int(math.cos(arm_ang) * R * 0.6),
-                          oy + bob + int(math.sin(arm_ang) * R * 0.3)),
+                         (ox + int(math.cos(arm_ang) * R * 0.6), oy + bob + int(math.sin(arm_ang) * R * 0.3)),
                          (rifle_end_x, rifle_end_y), R//3 + 2)
         pygame.draw.line(tmp, ac((100, 90, 80)),
-                         (ox + int(math.cos(arm_ang) * R * 0.6),
-                          oy + bob + int(math.sin(arm_ang) * R * 0.3)),
+                         (ox + int(math.cos(arm_ang) * R * 0.6), oy + bob + int(math.sin(arm_ang) * R * 0.3)),
                          (rifle_end_x, rifle_end_y), R//3)
-        # Scope
         scope_x = ox + int(math.cos(arm_ang) * R * 1.4)
         scope_y = oy + bob + int(math.sin(arm_ang) * R * 0.5)
         pygame.draw.circle(tmp, ac((60, 200, 255)), (scope_x, scope_y), R//4)
-
-        # Other arm
         back_ang = arm_ang + math.pi * 0.8
         bax = ox + int(math.cos(back_ang) * R * 0.7)
         bay = oy + bob + int(math.sin(back_ang) * R * 0.4)
         pygame.draw.line(tmp, (20, 15, 10, alpha), (ox, oy + bob), (bax, bay), R//2 + 2)
         pygame.draw.line(tmp, ac(skin), (ox, oy + bob), (bax, bay), R//2)
-
-        # Head
         head_y = oy - R + bob
         draw_outline_circle(ox, head_y, int(R * 0.9), skin)
-        # Hair / cap
-        cap_pts = [
-            (ox - R, head_y),
-            (ox - R, head_y - R//2),
-            (ox + int(R*0.3), head_y - R),
-            (ox + R, head_y - R//2),
-            (ox + R, head_y),
-        ]
-        pygame.draw.polygon(tmp, (20, 15, 10, alpha),
-                            [(x+2, y+2) for x, y in cap_pts])
+        cap_pts = [(ox - R, head_y), (ox - R, head_y - R//2), (ox + int(R*0.3), head_y - R), (ox + R, head_y - R//2), (ox + R, head_y)]
+        pygame.draw.polygon(tmp, (20, 15, 10, alpha), [(x+2, y+2) for x, y in cap_pts])
         pygame.draw.polygon(tmp, ac(hair), cap_pts)
-        # Eye
         eye_x = ox + int(math.cos(arm_ang) * R * 0.4)
         pygame.draw.circle(tmp, ac((20, 15, 10)), (eye_x, head_y), R//5)
         pygame.draw.circle(tmp, ac((255, 255, 255)), (eye_x, head_y), R//5 - 1)
         pygame.draw.circle(tmp, ac((20, 15, 10)), (eye_x + 1, head_y), R//8)
-        # Scope eye glow
         if starpower:
             pygame.draw.circle(tmp, ac((60, 200, 255)), (eye_x, head_y), R//5 + 2, 1)
 
     elif brawler_name == "minigun":
-        # MAGDALENA-style: stocky, big minigun
-        # Legs
         lx1 = ox - int(R * 0.55) + int(leg_swing * R * 0.5)
         lx2 = ox + int(R * 0.55) - int(leg_swing * R * 0.5)
         boot_col = (50, 35, 20)
         for lx in [lx1, lx2]:
-            pygame.draw.rect(tmp, (20, 15, 10, alpha),
-                             (lx - R//2 - 1, oy + R//2 - 1, int(R*1.1), int(R*1.3)), border_radius=5)
+            pygame.draw.rect(tmp, (20, 15, 10, alpha), (lx - R//2 - 1, oy + R//2 - 1, int(R*1.1), int(R*1.3)), border_radius=5)
             pygame.draw.rect(tmp, ac(outfit), (lx - R//2, oy + R//2, int(R*1.1), int(R*1.2)), border_radius=4)
             pygame.draw.rect(tmp, ac(boot_col), (lx - R//2, oy + R*2 - 5, int(R*1.1), 8), border_radius=3)
-
-        # Stocky body
         draw_outline_rect((ox - int(R*1.1), oy - R//2 + bob, int(R*2.2), int(R*1.6)), outfit)
-        # Chest armor plate
         draw_outline_rect((ox - int(R*0.7), oy - R//3 + bob, int(R*1.4), int(R*0.8)), (120, 90, 50))
-        # Straps
-        pygame.draw.line(tmp, ac((80, 60, 30)),
-                         (ox - R, oy - R//3 + bob), (ox + R, oy + R//2 + bob), 3)
-        pygame.draw.line(tmp, ac((80, 60, 30)),
-                         (ox + R, oy - R//3 + bob), (ox - R, oy + R//2 + bob), 3)
-
-        # MINIGUN weapon
+        pygame.draw.line(tmp, ac((80, 60, 30)), (ox - R, oy - R//3 + bob), (ox + R, oy + R//2 + bob), 3)
+        pygame.draw.line(tmp, ac((80, 60, 30)), (ox + R, oy - R//3 + bob), (ox - R, oy + R//2 + bob), 3)
         arm_ang = math.radians(face_angle)
         gun_base_x = ox + int(math.cos(arm_ang) * R * 0.5)
         gun_base_y = oy + bob + int(math.sin(arm_ang) * R * 0.3)
-        # Rotating barrels
         now_t = pygame.time.get_ticks() * 0.01 if starpower else pygame.time.get_ticks() * 0.004
         for barrel in range(3):
             b_ang = arm_ang + math.radians(barrel * 120 + now_t * 40)
@@ -453,85 +499,46 @@ def draw_brawler_detailed(surf, brawler_name, cx, cy, alpha=255, scale=1.0,
             by2 = by1 + int(math.sin(arm_ang) * R * 0.8)
             pygame.draw.line(tmp, (20, 15, 10, alpha), (bx1, by1), (bx2, by2), R//3 + 2)
             pygame.draw.line(tmp, ac((150, 140, 120)), (bx1, by1), (bx2, by2), R//3)
-        # Barrel housing
         pygame.draw.circle(tmp, (20, 15, 10, alpha), (gun_base_x, gun_base_y), R//2 + 2)
         pygame.draw.circle(tmp, ac((180, 160, 100)), (gun_base_x, gun_base_y), R//2)
-
-        # Arm holding gun
         pygame.draw.line(tmp, (20, 15, 10, alpha), (ox, oy + bob), (gun_base_x, gun_base_y), R//2 + 2)
         pygame.draw.line(tmp, ac(skin), (ox, oy + bob), (gun_base_x, gun_base_y), R//2)
-
-        # Head — round, cheerful
         head_y = oy - int(R * 1.05) + bob
         draw_outline_circle(ox, head_y, int(R * 1.0), skin)
-        # Cap
         cap_col = bdata["hair_color"]
-        cap_pts = [(ox - R, head_y - 2),
-                   (ox - int(R*0.8), head_y - R),
-                   (ox, head_y - int(R*1.2)),
-                   (ox + int(R*0.8), head_y - R),
-                   (ox + R, head_y - 2)]
+        cap_pts = [(ox - R, head_y - 2), (ox - int(R*0.8), head_y - R), (ox, head_y - int(R*1.2)), (ox + int(R*0.8), head_y - R), (ox + R, head_y - 2)]
         pygame.draw.polygon(tmp, (20, 15, 10, alpha), [(x+2, y+2) for x, y in cap_pts])
         pygame.draw.polygon(tmp, ac(cap_col), cap_pts)
-        # Goggle strap
-        pygame.draw.rect(tmp, (20, 15, 10, alpha),
-                         (ox - R + 1, head_y - 3, R*2 - 2, R//3 + 2))
+        pygame.draw.rect(tmp, (20, 15, 10, alpha), (ox - R + 1, head_y - 3, R*2 - 2, R//3 + 2))
         pygame.draw.rect(tmp, ac((60, 80, 100)), (ox - R + 2, head_y - 2, R*2 - 4, R//3))
-        # Big eyes
         eye_x = ox + int(math.cos(math.radians(face_angle)) * R * 0.3)
         pygame.draw.circle(tmp, ac((255, 255, 255)), (eye_x - 2, head_y + 2), R//3)
         pygame.draw.circle(tmp, ac((20, 15, 10)), (eye_x - 2, head_y + 2), R//4)
         pygame.draw.circle(tmp, ac((255, 255, 255)), (eye_x - 1, head_y + 1), R//8)
-        # Big grin
-        smile_pts = [(ox - R//2, head_y + R//3),
-                     (ox, head_y + R//2),
-                     (ox + R//2, head_y + R//3)]
+        smile_pts = [(ox - R//2, head_y + R//3), (ox, head_y + R//2), (ox + R//2, head_y + R//3)]
         for i in range(len(smile_pts) - 1):
-            pygame.draw.line(tmp, ac((60, 20, 20)),
-                             smile_pts[i], smile_pts[i+1], 2)
+            pygame.draw.line(tmp, ac((60, 20, 20)), smile_pts[i], smile_pts[i+1], 2)
 
     elif brawler_name == "mage":
-        # ANDRE-style: mage with staff and flame
-        # Robe (no visible legs, flowing)
-        robe_pts = [
-            (ox - R, oy + R + 4),
-            (ox - int(R*1.3), oy + int(R*2.2)),
-            (ox + int(R*1.3), oy + int(R*2.2)),
-            (ox + R, oy + R + 4),
-        ]
+        robe_pts = [(ox - R, oy + R + 4), (ox - int(R*1.3), oy + int(R*2.2)), (ox + int(R*1.3), oy + int(R*2.2)), (ox + R, oy + R + 4)]
         pygame.draw.polygon(tmp, (20, 15, 10, alpha), [(x+2, y+2) for x, y in robe_pts])
         pygame.draw.polygon(tmp, ac(outfit), robe_pts)
-        # Robe trim
         pygame.draw.polygon(tmp, ac(accent_c), robe_pts, 2)
-
-        # Body
         draw_outline_rect((ox - R, oy - R//2 + bob, R*2, int(R*1.5)), outfit)
-        # Magical runes on robe
         for i in range(3):
             rx = ox - R//2 + i * R//2
             ry = oy + bob + 2
             pygame.draw.circle(tmp, ac(accent_c), (rx, ry), 2)
-
-        # Staff (main weapon)
         arm_ang = math.radians(face_angle)
         staff_tip_x = ox + int(math.cos(arm_ang) * R * 2.2)
         staff_tip_y = oy + bob - R + int(math.sin(arm_ang) * R * 1.0)
         staff_base_x = ox - int(math.cos(arm_ang) * R * 0.3)
         staff_base_y = oy + bob + R + int(math.sin(arm_ang) * R * 0.2)
-        pygame.draw.line(tmp, (20, 15, 10, alpha),
-                         (staff_base_x, staff_base_y),
-                         (staff_tip_x, staff_tip_y), R//3 + 2)
-        pygame.draw.line(tmp, ac((120, 90, 60)),
-                         (staff_base_x, staff_base_y),
-                         (staff_tip_x, staff_tip_y), R//3)
-        # Orb/flame at staff tip
+        pygame.draw.line(tmp, (20, 15, 10, alpha), (staff_base_x, staff_base_y), (staff_tip_x, staff_tip_y), R//3 + 2)
+        pygame.draw.line(tmp, ac((120, 90, 60)), (staff_base_x, staff_base_y), (staff_tip_x, staff_tip_y), R//3)
         orb_pulse = int(R//3 + 2 * math.sin(pygame.time.get_ticks() * 0.005))
         now_t = pygame.time.get_ticks()
-        if starpower:
-            orb_col = (200, 150, 255)
-        else:
-            orb_col = (255, 120, 20)
-        # Glow
+        orb_col = (200, 150, 255) if starpower else (255, 120, 20)
         glow_s = pygame.Surface((orb_pulse*4, orb_pulse*4), pygame.SRCALPHA)
         ga = int(80 + 40 * math.sin(now_t * 0.006))
         pygame.draw.circle(glow_s, (*orb_col, ga), (orb_pulse*2, orb_pulse*2), orb_pulse*2)
@@ -539,17 +546,12 @@ def draw_brawler_detailed(surf, brawler_name, cx, cy, alpha=255, scale=1.0,
         pygame.draw.circle(tmp, (20, 15, 10, alpha), (staff_tip_x, staff_tip_y), orb_pulse + 2)
         pygame.draw.circle(tmp, ac(orb_col), (staff_tip_x, staff_tip_y), orb_pulse)
         pygame.draw.circle(tmp, ac((255, 255, 200)), (staff_tip_x - 1, staff_tip_y - 1), orb_pulse//2)
-
-        # Arm
         arm_mid_x = ox + int(math.cos(arm_ang) * R * 0.8)
         arm_mid_y = oy + bob + int(math.sin(arm_ang) * R * 0.4)
         pygame.draw.line(tmp, (20, 15, 10, alpha), (ox, oy + bob), (arm_mid_x, arm_mid_y), R//2 + 2)
         pygame.draw.line(tmp, ac(skin), (ox, oy + bob), (arm_mid_x, arm_mid_y), R//2)
-
-        # Head with wild hair
         head_y = oy - R + bob
         draw_outline_circle(ox, head_y, int(R * 0.9), skin)
-        # Wild hair spikes
         hair_col = bdata["hair_color"]
         for i in range(5):
             h_ang = math.radians(-120 + i * 50)
@@ -557,45 +559,29 @@ def draw_brawler_detailed(surf, brawler_name, cx, cy, alpha=255, scale=1.0,
             hy = head_y + int(math.sin(h_ang) * R)
             pygame.draw.circle(tmp, (20, 15, 10, alpha), (hx, hy), R//3 + 1)
             pygame.draw.circle(tmp, ac(hair_col), (hx, hy), R//3)
-        # Eyes (wide, magical)
         eye_off = int(math.cos(math.radians(face_angle)) * R * 0.3)
         for ex, ew in [(ox + eye_off - R//3, R//4), (ox + eye_off + R//3, R//4)]:
             pygame.draw.circle(tmp, ac((255, 255, 255)), (ex, head_y), ew)
             pygame.draw.circle(tmp, ac((100, 40, 200)), (ex, head_y), ew - 1)
             pygame.draw.circle(tmp, ac((255, 255, 200)), (ex - 1, head_y - 1), ew//3)
         if starpower:
-            # Invisible shimmer
             shim = pygame.Surface(tmp.get_size(), pygame.SRCALPHA)
             pygame.draw.circle(shim, (180, 120, 255, 60), (ox, oy), R * 2)
             tmp.blit(shim, (0, 0))
 
     elif brawler_name == "tank":
-        # MICHI-style: heavy armored bruiser
-        # Thick legs
         lx1 = ox - int(R * 0.6) + int(leg_swing * R * 0.4)
         lx2 = ox + int(R * 0.6) - int(leg_swing * R * 0.4)
         for lx in [lx1, lx2]:
-            # Armored boots
-            pygame.draw.rect(tmp, (20, 15, 10, alpha),
-                             (lx - R//2 - 2, oy + R//2 - 1, int(R*1.2), int(R*1.4) + 2), border_radius=4)
+            pygame.draw.rect(tmp, (20, 15, 10, alpha), (lx - R//2 - 2, oy + R//2 - 1, int(R*1.2), int(R*1.4) + 2), border_radius=4)
             pygame.draw.rect(tmp, ac(outfit), (lx - R//2, oy + R//2, int(R*1.2), int(R*1.4)), border_radius=3)
-            # Boot rivets
             pygame.draw.circle(tmp, ac(accent_c), (lx, oy + R*2 - 4), 3)
-
-        # HEAVY armored body
         draw_outline_rect((ox - int(R*1.2), oy - int(R*0.8) + bob, int(R*2.4), int(R*2.0)), outfit)
-        # Shoulder pads
         for sx_off in [-int(R*1.3), int(R*0.5)]:
-            draw_outline_rect((ox + sx_off, oy - int(R*0.6) + bob, int(R*0.8), int(R*0.8)),
-                              (150, 120, 60), radius=4)
-        # Chest plate
-        draw_outline_rect((ox - int(R*0.8), oy - int(R*0.6) + bob, int(R*1.6), int(R*1.2)),
-                          (160, 130, 70), radius=4)
-        # Rivets on chest
+            draw_outline_rect((ox + sx_off, oy - int(R*0.6) + bob, int(R*0.8), int(R*0.8)), (150, 120, 60), radius=4)
+        draw_outline_rect((ox - int(R*0.8), oy - int(R*0.6) + bob, int(R*1.6), int(R*1.2)), (160, 130, 70), radius=4)
         for rix, riy in [(-R//2, 0), (R//2, 0), (0, R//2)]:
             pygame.draw.circle(tmp, ac((200, 170, 80)), (ox + rix, oy + riy + bob), 3)
-
-        # Shotgun — big barrel array
         arm_ang = math.radians(face_angle)
         gun_x = ox + int(math.cos(arm_ang) * R * 0.7)
         gun_y = oy + bob + int(math.sin(arm_ang) * R * 0.3)
@@ -607,147 +593,69 @@ def draw_brawler_detailed(surf, brawler_name, cx, cy, alpha=255, scale=1.0,
             by2 = by1 + int(math.sin(arm_ang) * R * 0.6)
             pygame.draw.line(tmp, (20, 15, 10, alpha), (bx1, by1), (bx2, by2), R//3 + 2)
             pygame.draw.line(tmp, ac((180, 150, 100)), (bx1, by1), (bx2, by2), R//3)
-
-        # Thick arm
         pygame.draw.line(tmp, (20, 15, 10, alpha), (ox, oy + bob), (gun_x, gun_y), R//2 + 2 + 2)
         pygame.draw.line(tmp, ac(skin), (ox, oy + bob), (gun_x, gun_y), R//2 + 2)
-
-        # Head — large, scarred
         head_y = oy - int(R * 1.0) + bob
         draw_outline_circle(ox, head_y, int(R * 1.05), skin)
-        # Helmet
-        helm_pts = [(ox - R, head_y - 2),
-                    (ox - R, head_y - int(R*0.8)),
-                    (ox, head_y - int(R*1.1)),
-                    (ox + R, head_y - int(R*0.8)),
-                    (ox + R, head_y - 2)]
+        helm_pts = [(ox - R, head_y - 2), (ox - R, head_y - int(R*0.8)), (ox, head_y - int(R*1.1)), (ox + R, head_y - int(R*0.8)), (ox + R, head_y - 2)]
         pygame.draw.polygon(tmp, (20, 15, 10, alpha), [(x+2, y+2) for x, y in helm_pts])
         pygame.draw.polygon(tmp, ac(outfit), helm_pts)
         pygame.draw.polygon(tmp, ac(accent_c), helm_pts, 2)
-        # Angry eyes
         eye_x = ox + int(math.cos(math.radians(face_angle)) * R * 0.3)
-        # Furrowed brow
-        pygame.draw.line(tmp, ac((60, 30, 10)),
-                         (eye_x - R//2, head_y - R//4),
-                         (eye_x, head_y - R//6), 3)
+        pygame.draw.line(tmp, ac((60, 30, 10)), (eye_x - R//2, head_y - R//4), (eye_x, head_y - R//6), 3)
         pygame.draw.circle(tmp, ac((20, 15, 10)), (eye_x, head_y + 2), R//4 + 1)
         pygame.draw.circle(tmp, ac((200, 50, 20)), (eye_x, head_y + 2), R//4)
         pygame.draw.circle(tmp, ac((255, 200, 50)), (eye_x, head_y + 2), R//6)
-        # Scar
-        pygame.draw.line(tmp, ac((120, 60, 40)),
-                         (eye_x - R//3, head_y - R//2),
-                         (eye_x, head_y + R//3), 2)
+        pygame.draw.line(tmp, ac((120, 60, 40)), (eye_x - R//3, head_y - R//2), (eye_x, head_y + R//3), 2)
 
     elif brawler_name == "ninja":
-        # BEIDL-style: sleek ninja with mask
-        # Fast legs with motion blur suggestion
         lx1 = ox - int(R * 0.45) + int(leg_swing * R * 0.7)
         lx2 = ox + int(R * 0.45) - int(leg_swing * R * 0.7)
         for lx in [lx1, lx2]:
-            pygame.draw.rect(tmp, (20, 15, 10, alpha),
-                             (lx - R//2 - 1, oy + R//2 - 1, R, int(R*1.3) + 1), border_radius=3)
+            pygame.draw.rect(tmp, (20, 15, 10, alpha), (lx - R//2 - 1, oy + R//2 - 1, R, int(R*1.3) + 1), border_radius=3)
             pygame.draw.rect(tmp, ac(outfit), (lx - R//2, oy + R//2, R, int(R*1.3)), border_radius=2)
-
-        # Sleek body
         draw_outline_rect((ox - int(R*0.9), oy - R//2 + bob, int(R*1.8), int(R*1.5)), outfit)
-        # Ninja belt/sash
         pygame.draw.rect(tmp, ac((60, 30, 20)), (ox - R, oy + R//3 + bob, R*2, R//3))
-        # Shuriken holsters
-        for sx_off in [-R//2, R//2]:
-            sh_tmp = pygame.Surface((12, 12), pygame.SRCALPHA)
-            for angle in range(0, 360, 45):
-                a = math.radians(angle)
-                px1 = 6 + int(math.cos(a) * 5)
-                py1 = 6 + int(math.sin(a) * 5)
-                px2 = 6 + int(math.cos(a+math.pi) * 5)
-                py2 = 6 + int(math.sin(a+math.pi) * 5)
-                pygame.draw.line(sh_tmp, ac(accent_c), (px1, py1), (px2, py2), 1)
-            pygame.draw.circle(sh_tmp, ac(accent_c), (6, 6), 2)
-            tmp.blit(sh_tmp, (ox + sx_off - 6, oy + R//3 + bob - 6))
-
-        # Arm with shuriken
         arm_ang = math.radians(face_angle)
         throw_x = ox + int(math.cos(arm_ang) * R * 1.4)
         throw_y = oy + bob + int(math.sin(arm_ang) * R * 0.5)
         pygame.draw.line(tmp, (20, 15, 10, alpha), (ox, oy + bob), (throw_x, throw_y), R//2 + 2)
         pygame.draw.line(tmp, ac(skin), (ox, oy + bob), (throw_x, throw_y), R//2)
-        # Shuriken in hand (spinning)
         now_t = pygame.time.get_ticks()
         shur_ang = now_t * 0.008 if starpower else now_t * 0.004
         sh_s = pygame.Surface((R, R), pygame.SRCALPHA)
-        sh_cx = R//2
-        sh_cy = R//2
+        sh_cx = R//2; sh_cy = R//2
         for si in range(4):
             sa = shur_ang + math.pi/4 * si * 2
             pygame.draw.polygon(sh_s, ac(accent_c), [
                 (sh_cx, sh_cy),
-                (int(sh_cx + math.cos(sa) * R//2),
-                 int(sh_cy + math.sin(sa) * R//2)),
-                (int(sh_cx + math.cos(sa + math.pi/4) * R//4),
-                 int(sh_cy + math.sin(sa + math.pi/4) * R//4)),
+                (int(sh_cx + math.cos(sa) * R//2), int(sh_cy + math.sin(sa) * R//2)),
+                (int(sh_cx + math.cos(sa + math.pi/4) * R//4), int(sh_cy + math.sin(sa + math.pi/4) * R//4)),
             ])
         pygame.draw.circle(sh_s, ac((200, 220, 200)), (sh_cx, sh_cy), 3)
         tmp.blit(sh_s, (throw_x - R//2, throw_y - R//2))
-
-        # Head with ninja mask
         head_y = oy - int(R * 0.9) + bob
         draw_outline_circle(ox, head_y, int(R * 0.85), skin)
-        # Mask bottom half
-        mask_pts = [
-            (ox - R, head_y + 2),
-            (ox - R, head_y + int(R*0.7)),
-            (ox + R, head_y + int(R*0.7)),
-            (ox + R, head_y + 2),
-        ]
+        mask_pts = [(ox - R, head_y + 2), (ox - R, head_y + int(R*0.7)), (ox + R, head_y + int(R*0.7)), (ox + R, head_y + 2)]
         pygame.draw.polygon(tmp, (20, 15, 10, alpha), [(x+1, y+1) for x, y in mask_pts])
         pygame.draw.polygon(tmp, ac(outfit), mask_pts)
-        # Headband
-        pygame.draw.rect(tmp, (20, 15, 10, alpha),
-                         (ox - R + 1, head_y - R//4 - 1, R*2 - 2, R//3 + 2), border_radius=2)
+        pygame.draw.rect(tmp, (20, 15, 10, alpha), (ox - R + 1, head_y - R//4 - 1, R*2 - 2, R//3 + 2), border_radius=2)
         pygame.draw.rect(tmp, ac(accent_c), (ox - R + 2, head_y - R//4, R*2 - 4, R//3), border_radius=2)
-        # Sharp eyes
         eye_x = ox + int(math.cos(math.radians(face_angle)) * R * 0.3)
         for ex in [eye_x - R//3, eye_x + R//3]:
-            # Narrow ninja eyes
             pygame.draw.rect(tmp, ac((20, 15, 10)), (ex - R//4, head_y - 3, R//2, R//4))
             pygame.draw.rect(tmp, ac((60, 200, 160)), (ex - R//4 + 1, head_y - 2, R//2 - 2, R//4 - 2))
-        # Speed lines if starpower
-        if starpower:
-            for i in range(3):
-                sl_ang = arm_ang + math.pi + math.radians(i * 20 - 20)
-                sl_len = R * (2 - i * 0.5)
-                sl_x1 = ox + int(math.cos(sl_ang) * R)
-                sl_y1 = oy + bob + int(math.sin(sl_ang) * R * 0.5)
-                sl_x2 = ox + int(math.cos(sl_ang) * (R + sl_len))
-                sl_y2 = oy + bob + int(math.sin(sl_ang) * (R * 0.5 + sl_len * 0.4))
-                a_val = max(0, 180 - i * 60)
-                pygame.draw.line(tmp, (*accent_c, a_val), (sl_x1, sl_y1), (sl_x2, sl_y2), 2)
 
     elif brawler_name == "healer":
-        # SARAH-style: support with glowing orb / wizard hat vibe
-        # Flowing robe like mage
-        robe_pts = [
-            (ox - R, oy + R),
-            (ox - int(R*1.2), oy + int(R*2.1)),
-            (ox + int(R*1.2), oy + int(R*2.1)),
-            (ox + R, oy + R),
-        ]
+        robe_pts = [(ox - R, oy + R), (ox - int(R*1.2), oy + int(R*2.1)), (ox + int(R*1.2), oy + int(R*2.1)), (ox + R, oy + R)]
         pygame.draw.polygon(tmp, (20, 15, 10, alpha), [(x+2, y+2) for x, y in robe_pts])
         pygame.draw.polygon(tmp, ac(outfit), robe_pts)
-        # Green cross symbol on robe
-        pygame.draw.rect(tmp, ac((200, 255, 150)),
-                         (ox - R//6, oy + int(R*0.8), R//3, int(R*0.8)), border_radius=2)
-        pygame.draw.rect(tmp, ac((200, 255, 150)),
-                         (ox - R//2, oy + int(R*1.0), R, R//3), border_radius=2)
-
-        # Body
+        pygame.draw.rect(tmp, ac((200, 255, 150)), (ox - R//6, oy + int(R*0.8), R//3, int(R*0.8)), border_radius=2)
+        pygame.draw.rect(tmp, ac((200, 255, 150)), (ox - R//2, oy + int(R*1.0), R, R//3), border_radius=2)
         draw_outline_rect((ox - R, oy - R//2 + bob, R*2, int(R*1.5)), outfit)
-
-        # Healing orb weapon
         arm_ang = math.radians(face_angle)
         orb_x = ox + int(math.cos(arm_ang) * R * 1.6)
         orb_y = oy + bob + int(math.sin(arm_ang) * R * 0.7)
-        # Orb glow pulse
         now_t = pygame.time.get_ticks()
         orb_r = int(R * 0.5 + R * 0.15 * math.sin(now_t * 0.004))
         glow_s = pygame.Surface((orb_r*4, orb_r*4), pygame.SRCALPHA)
@@ -757,58 +665,254 @@ def draw_brawler_detailed(surf, brawler_name, cx, cy, alpha=255, scale=1.0,
         pygame.draw.circle(tmp, (20, 15, 10, alpha), (orb_x, orb_y), orb_r + 2)
         pygame.draw.circle(tmp, ac(main_c), (orb_x, orb_y), orb_r)
         pygame.draw.circle(tmp, ac((200, 255, 200)), (orb_x - orb_r//3, orb_y - orb_r//3), orb_r//3)
-        # Orbiting sparkles
         for si in range(3):
             s_ang = now_t * 0.003 + math.pi * 2/3 * si
             sx2 = orb_x + int(math.cos(s_ang) * orb_r * 1.5)
             sy2 = orb_y + int(math.sin(s_ang) * orb_r * 1.5)
             pygame.draw.circle(tmp, ac(accent_c), (sx2, sy2), 3)
-
-        # Arm
         pygame.draw.line(tmp, (20, 15, 10, alpha), (ox, oy + bob), (orb_x, orb_y), R//2 + 2)
         pygame.draw.line(tmp, ac(skin), (ox, oy + bob), (orb_x, orb_y), R//2)
-
-        # Head with witch-style hat
         head_y = oy - R + bob
         draw_outline_circle(ox, head_y, int(R * 0.9), skin)
-        # Witch hat
-        hat_base_pts = [(ox - R, head_y - 2), (ox + R, head_y - 2),
-                        (ox + int(R*0.6), head_y - R), (ox - int(R*0.6), head_y - R)]
-        hat_tip_pts  = [(ox - int(R*0.6), head_y - R), (ox + int(R*0.6), head_y - R),
-                        (ox + int(R*0.2), head_y - int(R*2.1)), (ox - int(R*0.2), head_y - int(R*2.1))]
+        hat_base_pts = [(ox - R, head_y - 2), (ox + R, head_y - 2), (ox + int(R*0.6), head_y - R), (ox - int(R*0.6), head_y - R)]
+        hat_tip_pts  = [(ox - int(R*0.6), head_y - R), (ox + int(R*0.6), head_y - R), (ox + int(R*0.2), head_y - int(R*2.1)), (ox - int(R*0.2), head_y - int(R*2.1))]
         for pts in [hat_base_pts, hat_tip_pts]:
             pygame.draw.polygon(tmp, (20, 15, 10, alpha), [(x+2, y+2) for x, y in pts])
             pygame.draw.polygon(tmp, ac(outfit), pts)
-        # Hat band
-        pygame.draw.rect(tmp, ac(accent_c),
-                         (ox - int(R*0.65), head_y - R - 2, int(R*1.3), R//4))
-        # Eyes (round, kind)
+        pygame.draw.rect(tmp, ac(accent_c), (ox - int(R*0.65), head_y - R - 2, int(R*1.3), R//4))
         eye_x = ox + int(math.cos(math.radians(face_angle)) * R * 0.25)
         for ex in [eye_x - R//3, eye_x + R//3]:
             pygame.draw.circle(tmp, ac((255, 255, 255)), (ex, head_y + 2), R//4)
             pygame.draw.circle(tmp, ac((30, 160, 30)), (ex, head_y + 2), R//4 - 1)
             pygame.draw.circle(tmp, ac((20, 15, 10)), (ex, head_y + 2), R//5)
             pygame.draw.circle(tmp, ac((255, 255, 255)), (ex + 1, head_y + 1), 2)
-        # Glasses
         pygame.draw.circle(tmp, ac((200, 220, 255)), (eye_x - R//3, head_y + 2), R//4, 1)
         pygame.draw.circle(tmp, ac((200, 220, 255)), (eye_x + R//3, head_y + 2), R//4, 1)
-        pygame.draw.line(tmp, ac((150, 170, 200)),
-                         (eye_x - R//3 + R//4, head_y + 2),
-                         (eye_x + R//3 - R//4, head_y + 2), 1)
-        # Starpower regen aura
-        if starpower:
+        pygame.draw.line(tmp, ac((150, 170, 200)), (eye_x - R//3 + R//4, head_y + 2), (eye_x + R//3 - R//4, head_y + 2), 1)
+        if invincible:
             for i in range(4):
-                sa = now_t * 0.002 + math.pi/2 * i
+                sa = pygame.time.get_ticks() * 0.002 + math.pi/2 * i
                 sx2 = ox + int(math.cos(sa) * R * 1.5)
                 sy2 = oy + bob + int(math.sin(sa) * R * 0.7)
-                pygame.draw.circle(tmp, ac((150, 255, 100)), (sx2, sy2), 4)
+                pygame.draw.circle(tmp, ac((100, 220, 255)), (sx2, sy2), 5)
+
+    # ── BERSERKER ─────────────────────────────────────────────────────────────
+    elif brawler_name == "berserker":
+        # Thick legs, stomping
+        lx1 = ox - int(R * 0.55) + int(leg_swing * R * 0.55)
+        lx2 = ox + int(R * 0.55) - int(leg_swing * R * 0.55)
+        for lx in [lx1, lx2]:
+            pygame.draw.rect(tmp, (20, 15, 10, alpha), (lx - R//2 - 2, oy + R//2, int(R*1.2), int(R*1.3) + 2), border_radius=4)
+            pygame.draw.rect(tmp, ac((80, 20, 20)), (lx - R//2, oy + R//2, int(R*1.2), int(R*1.3)), border_radius=3)
+            pygame.draw.rect(tmp, ac((40, 10, 10)), (lx - R//2, oy + R*2 - 4, int(R*1.2), 7), border_radius=3)
+        # Big barrel chest
+        draw_outline_rect((ox - int(R*1.2), oy - int(R*0.7) + bob, int(R*2.4), int(R*1.8)), (100, 20, 20))
+        # Abs lines
+        for i in range(2):
+            pygame.draw.line(tmp, ac((60, 10, 10)), (ox - int(R*0.8), oy + i*R//3 + bob), (ox + int(R*0.8), oy + i*R//3 + bob), 2)
+        # Shoulder spikes
+        for sx_off, side in [(-int(R*1.4), -1), (int(R*0.6), 1)]:
+            pygame.draw.rect(tmp, ac((60, 60, 60)), (ox + sx_off, oy - int(R*0.5) + bob, int(R*0.8), int(R*0.8)), border_radius=3)
+            spike_x = ox + sx_off + R//4 + (0 if side < 0 else int(R*0.4))
+            pygame.draw.polygon(tmp, ac((140, 140, 140)), [
+                (spike_x, oy - int(R*0.5) + bob),
+                (spike_x - R//5, oy - int(R*1.1) + bob),
+                (spike_x + R//5, oy - int(R*1.1) + bob),
+            ])
+        # Dual cannons
+        arm_ang = math.radians(face_angle)
+        perp = arm_ang + math.pi/2
+        for off in [-R//3, R//3]:
+            c_bx = ox + int(math.cos(perp) * off) + int(math.cos(arm_ang) * R*0.4)
+            c_by = oy + bob + int(math.sin(perp) * off) + int(math.sin(arm_ang) * R*0.2)
+            c_ex = c_bx + int(math.cos(arm_ang) * R * 1.8)
+            c_ey = c_by + int(math.sin(arm_ang) * R * 0.8)
+            pygame.draw.line(tmp, (20, 15, 10, alpha), (c_bx, c_by), (c_ex, c_ey), R//3 + 2)
+            pygame.draw.line(tmp, ac((160, 60, 60)), (c_bx, c_by), (c_ex, c_ey), R//3)
+            # Muzzle
+            pygame.draw.circle(tmp, ac((80, 40, 40)), (c_ex, c_ey), R//4 + 1)
+            pygame.draw.circle(tmp, ac((30, 10, 10)), (c_ex, c_ey), R//4)
+        # Arms
+        arm_mid_x = ox + int(math.cos(arm_ang) * R * 0.6)
+        arm_mid_y = oy + bob + int(math.sin(arm_ang) * R * 0.3)
+        pygame.draw.line(tmp, (20, 15, 10, alpha), (ox, oy + bob), (arm_mid_x, arm_mid_y), R//2 + 3)
+        pygame.draw.line(tmp, ac(skin), (ox, oy + bob), (arm_mid_x, arm_mid_y), R//2 + 1)
+        # Big round head
+        head_y = oy - int(R * 1.05) + bob
+        draw_outline_circle(ox, head_y, int(R * 1.0), skin)
+        # Mohawk
+        for i in range(4):
+            hx = ox - int(R*0.3) + i * R//3
+            hy = head_y - int(R*0.5) - (R//3 if i % 2 == 0 else 0)
+            pygame.draw.circle(tmp, (20, 15, 10, alpha), (hx, hy), R//4 + 1)
+            pygame.draw.circle(tmp, ac((180, 20, 20)), (hx, hy), R//4)
+        # Snarl mouth
+        pygame.draw.rect(tmp, ac((20, 10, 10)), (ox - R//2, head_y + R//4, R, R//3), border_radius=2)
+        pygame.draw.rect(tmp, ac((200, 50, 50)), (ox - R//3, head_y + R//4 + 2, R//1, R//4), border_radius=1)
+        # Angry eyes
+        eye_x = ox + int(math.cos(math.radians(face_angle)) * R * 0.3)
+        for ex in [eye_x - R//3, eye_x + R//3]:
+            pygame.draw.circle(tmp, ac((20, 15, 10)), (ex, head_y), R//4 + 1)
+            pygame.draw.circle(tmp, ac((255, 80, 20)), (ex, head_y), R//4)
+            pygame.draw.circle(tmp, ac((255, 220, 50)), (ex, head_y), R//6)
+        # Rage glow around eyes
+        if rage:
+            now_t = pygame.time.get_ticks()
+            ra_e = int(80 + 40 * math.sin(now_t * 0.01))
+            pygame.draw.circle(tmp, (255, 60, 0, ra_e), (ox, head_y), R + 2, 2)
+
+    # ── GHOST ─────────────────────────────────────────────────────────────────
+    elif brawler_name == "ghost":
+        now_t = pygame.time.get_ticks()
+        # Floating body — ghost has no legs, just a wispy trail
+        wisp_alpha = int(160 + 60 * math.sin(now_t * 0.003))
+        for i in range(4):
+            wy = oy + R + int(i * R * 0.5)
+            wa = max(10, wisp_alpha - i * 40)
+            wr = max(2, R - i * R//4)
+            wsh = pygame.Surface((wr*2, wr), pygame.SRCALPHA)
+            pygame.draw.ellipse(wsh, (*outfit, wa), (0, 0, wr*2, wr))
+            tmp.blit(wsh, (ox - wr, wy))
+        # Body robe
+        ghost_body_pts = [
+            (ox - R, oy + R//2),
+            (ox - int(R*1.1), oy + int(R*1.8)),
+            (ox - int(R*0.6), oy + int(R*1.4)),
+            (ox, oy + int(R*1.8)),
+            (ox + int(R*0.6), oy + int(R*1.4)),
+            (ox + int(R*1.1), oy + int(R*1.8)),
+            (ox + R, oy + R//2),
+        ]
+        pygame.draw.polygon(tmp, (20, 15, 10, alpha), [(x+1, y+1) for x, y in ghost_body_pts])
+        pygame.draw.polygon(tmp, ac(outfit), ghost_body_pts)
+        # Shimmering overlay
+        shim_s = pygame.Surface((R*4, R*3), pygame.SRCALPHA)
+        shim_a = int(30 + 20 * math.sin(now_t * 0.004))
+        pygame.draw.ellipse(shim_s, (160, 200, 255, shim_a), (0, 0, R*4, R*3))
+        tmp.blit(shim_s, (ox - R*2, oy - R//2 + bob))
+        # Torso
+        draw_outline_rect((ox - int(R*0.9), oy - R//3 + bob, int(R*1.8), int(R*1.2)), outfit)
+        # Phantom orb weapon
+        arm_ang = math.radians(face_angle)
+        orb_dist = R * 1.8
+        orb_x = ox + int(math.cos(arm_ang) * orb_dist)
+        orb_y = oy + bob + int(math.sin(arm_ang) * orb_dist * 0.6)
+        orb_r = int(R * 0.55 + R * 0.1 * math.sin(now_t * 0.005))
+        # Outer glow
+        glow_s = pygame.Surface((orb_r*5, orb_r*5), pygame.SRCALPHA)
+        ga = int(50 + 20 * math.sin(now_t * 0.004))
+        pygame.draw.circle(glow_s, (140, 180, 255, ga), (orb_r*2, orb_r*2), orb_r*2)
+        tmp.blit(glow_s, (orb_x - orb_r*2, orb_y - orb_r*2))
+        # Orb swirls
+        for si in range(3):
+            s_ang = now_t * 0.004 + math.pi * 2/3 * si
+            sx2 = orb_x + int(math.cos(s_ang) * orb_r * 0.7)
+            sy2 = orb_y + int(math.sin(s_ang) * orb_r * 0.7)
+            pygame.draw.circle(tmp, ac((200, 220, 255)), (sx2, sy2), orb_r//3)
+        pygame.draw.circle(tmp, (20, 15, 10, alpha), (orb_x, orb_y), orb_r + 2)
+        pygame.draw.circle(tmp, ac(main_c), (orb_x, orb_y), orb_r)
+        pygame.draw.circle(tmp, ac((240, 248, 255)), (orb_x - orb_r//3, orb_y - orb_r//3), orb_r//3)
+        # Arm
+        pygame.draw.line(tmp, (20, 15, 10, alpha), (ox, oy + bob), (orb_x, orb_y), R//2 + 2)
+        pygame.draw.line(tmp, ac(skin), (ox, oy + bob), (orb_x, orb_y), R//2)
+        # Head — translucent, ethereal
+        head_y = oy - int(R * 0.95) + bob
+        head_surf = pygame.Surface((R*3, R*3), pygame.SRCALPHA)
+        head_a = min(alpha, 200)
+        pygame.draw.circle(head_surf, (*skin[:3], head_a), (R*3//2, R*3//2), int(R * 0.9))
+        # Dark hair/crown
+        crown_pts = []
+        for i in range(5):
+            cr_ang = math.radians(-100 + i * 50)
+            cr_r = R if i % 2 == 0 else int(R * 0.7)
+            crown_pts.append((R*3//2 + int(math.cos(cr_ang) * cr_r), R*3//2 + int(math.sin(cr_ang) * cr_r)))
+        pygame.draw.polygon(head_surf, (*hair, min(alpha, 220)), crown_pts)
+        tmp.blit(head_surf, (ox - R*3//2, head_y - R*3//2))
+        # Glowing eye sockets
+        eye_x = ox + int(math.cos(math.radians(face_angle)) * R * 0.3)
+        for ex in [eye_x - R//3, eye_x + R//3]:
+            pygame.draw.circle(tmp, ac((20, 20, 40)), (ex, head_y), R//4 + 1)
+            # Eerie glow
+            glow_eye = pygame.Surface((R, R), pygame.SRCALPHA)
+            eye_ga = int(150 + 80 * math.sin(now_t * 0.005))
+            pygame.draw.circle(glow_eye, (140, 200, 255, eye_ga), (R//2, R//2), R//3)
+            tmp.blit(glow_eye, (ex - R//2, head_y - R//2))
+        if wallpierce:
+            # Phase shimmer — bright outline
+            pygame.draw.ellipse(tmp, ac((140, 180, 255)), (ox - R, oy + bob - R, R*2, R*3), 2)
+
+    # ── BOMBER ────────────────────────────────────────────────────────────────
+    elif brawler_name == "bomber":
+        now_t = pygame.time.get_ticks()
+        # Legs with big boots
+        lx1 = ox - int(R * 0.5) + int(leg_swing * R * 0.5)
+        lx2 = ox + int(R * 0.5) - int(leg_swing * R * 0.5)
+        for lx in [lx1, lx2]:
+            pygame.draw.rect(tmp, (20, 15, 10, alpha), (lx - R//2 - 2, oy + R//2, int(R*1.2), int(R*1.3)), border_radius=4)
+            pygame.draw.rect(tmp, ac((60, 50, 10)), (lx - R//2, oy + R//2, int(R*1.2), int(R*1.3)), border_radius=3)
+            pygame.draw.rect(tmp, ac((100, 80, 20)), (lx - R//2, oy + R*2 - 5, int(R*1.2), 8), border_radius=3)
+        # Bomber jacket body
+        draw_outline_rect((ox - int(R*1.05), oy - int(R*0.6) + bob, int(R*2.1), int(R*1.7)), (60, 50, 10))
+        # Jacket zips and pockets
+        pygame.draw.line(tmp, ac((120, 100, 30)), (ox, oy - int(R*0.5) + bob), (ox, oy + int(R*0.8) + bob), 3)
+        for py_off in [0, R//2]:
+            pygame.draw.rect(tmp, ac((100, 80, 20)), (ox - R + R//4, oy + py_off + bob, R//2, R//3), border_radius=2)
+            pygame.draw.rect(tmp, ac((100, 80, 20)), (ox + R//4, oy + py_off + bob, R//2, R//3), border_radius=2)
+        # Bomb bag on back (visible as bump)
+        bag_s = pygame.Surface((R*2, R*2), pygame.SRCALPHA)
+        pygame.draw.ellipse(bag_s, (*((80, 60, 10)), min(alpha, 180)), (0, 0, R*2, R*2))
+        pygame.draw.ellipse(bag_s, (*((40, 30, 5)), min(alpha, 180)), (0, 0, R*2, R*2), 2)
+        arm_ang_back = math.radians(face_angle) + math.pi
+        back_x = ox + int(math.cos(arm_ang_back) * R * 0.7)
+        back_y = oy + bob + int(math.sin(arm_ang_back) * R * 0.3)
+        tmp.blit(bag_s, (back_x - R, back_y - R))
+        # Throwing arm with bomb
+        arm_ang = math.radians(face_angle)
+        throw_x = ox + int(math.cos(arm_ang) * R * 1.5)
+        throw_y = oy + bob + int(math.sin(arm_ang) * R * 0.7)
+        pygame.draw.line(tmp, (20, 15, 10, alpha), (ox, oy + bob), (throw_x, throw_y), R//2 + 2)
+        pygame.draw.line(tmp, ac(skin), (ox, oy + bob), (throw_x, throw_y), R//2)
+        # Bomb in hand
+        starpower_active_local = starpower
+        bomb_r = R//2 + (R//4 if starpower_active_local else 0)
+        pygame.draw.circle(tmp, (20, 15, 10, alpha), (throw_x, throw_y), bomb_r + 2)
+        pygame.draw.circle(tmp, ac((40, 40, 10)), (throw_x, throw_y), bomb_r)
+        # Fuse spark
+        fuse_ang = now_t * 0.008
+        fx = throw_x + int(math.cos(fuse_ang) * bomb_r)
+        fy = throw_y - bomb_r + int(math.sin(fuse_ang) * bomb_r * 0.3)
+        pygame.draw.line(tmp, ac((140, 100, 20)), (throw_x, throw_y - bomb_r), (fx, fy), 2)
+        spark_a = int(150 + 100 * math.sin(now_t * 0.02))
+        spark_col = (255, 200, 50) if not starpower_active_local else (255, 100, 20)
+        pygame.draw.circle(tmp, (*spark_col, spark_a), (fx, fy), 3)
+        # Head with goggles and bandana
+        head_y = oy - R + bob
+        draw_outline_circle(ox, head_y, int(R * 0.92), skin)
+        # Bandana / helmet
+        pygame.draw.rect(tmp, (20, 15, 10, alpha), (ox - R + 1, head_y - R//3, R*2 - 2, R//2 + 2), border_radius=4)
+        pygame.draw.rect(tmp, ac((100, 80, 20)), (ox - R + 2, head_y - R//3, R*2 - 4, R//2), border_radius=3)
+        # Goggles
+        for ex in [ox - R//3, ox + R//3]:
+            pygame.draw.circle(tmp, (20, 15, 10, alpha), (ex, head_y + R//6), R//3 + 2)
+            pygame.draw.circle(tmp, ac((60, 160, 80)), (ex, head_y + R//6), R//3)
+            pygame.draw.circle(tmp, ac((100, 220, 120)), (ex - 1, head_y + R//6 - 1), R//5)
+        pygame.draw.line(tmp, ac((120, 100, 30)), (ox - R//3 + R//3, head_y + R//6), (ox + R//3 - R//3, head_y + R//6), 2)
+        # Grin below bandana
+        smile_pts2 = [(ox - R//2, head_y + R//2), (ox - R//4, head_y + int(R*0.65)), (ox, head_y + int(R*0.7)), (ox + R//4, head_y + int(R*0.65)), (ox + R//2, head_y + R//2)]
+        for i in range(len(smile_pts2) - 1):
+            pygame.draw.line(tmp, ac((40, 20, 5)), smile_pts2[i], smile_pts2[i+1], 2)
+        # Mega-bomb glow
+        if starpower_active_local:
+            mg = pygame.Surface(tmp.get_size(), pygame.SRCALPHA)
+            ma = int(40 + 20 * math.sin(now_t * 0.01))
+            pygame.draw.circle(mg, (255, 180, 20, ma), (ox, oy), R * 2)
+            tmp.blit(mg, (0, 0))
 
     else:
-        # Fallback generic character
         draw_outline_circle(ox, oy + bob, R, main_c)
         draw_outline_circle(ox, oy - R + bob, int(R*0.8), skin)
 
-    # Shoot flash effect
+    # Shoot flash
     if shoot_flash > 0:
         arm_ang = math.radians(face_angle)
         flash_x = ox + int(math.cos(arm_ang) * R * 2)
@@ -821,29 +925,30 @@ def draw_brawler_detailed(surf, brawler_name, cx, cy, alpha=255, scale=1.0,
 
     surf.blit(tmp, (cx - ox, cy - oy))
 
-# Legacy wrapper for backward compat
 def draw_brawler(surf, brawler_name, x, y, alpha=255, scale=1.0, starpower=False, alive=True):
     draw_brawler_detailed(surf, brawler_name, x, y, alpha=alpha, scale=scale,
                           starpower=starpower, alive=alive)
 
 # ─── BULLET VISUALS PER WEAPON ────────────────────────────────────────────────
 BULLET_STYLE = {
-    "sniper":   {"color": (100, 220, 255), "size": 8,  "glow": (80, 200, 255), "trail": True},
+    "sniper":   {"color": (100, 220, 255), "size": 8,  "glow": (80,  200, 255), "trail": True},
     "minigun":  {"color": (255, 200,  50), "size": 5,  "glow": (255, 160,  30), "trail": False},
     "magic":    {"color": (220, 100, 255), "size": 7,  "glow": (180,  60, 255), "trail": True},
     "shotgun":  {"color": (255, 120,  40), "size": 6,  "glow": (255,  80,  20), "trail": False},
     "shuriken": {"color": (100, 255, 200), "size": 7,  "glow": ( 60, 220, 160), "trail": True},
     "orb":      {"color": (120, 255, 100), "size": 8,  "glow": ( 80, 200,  60), "trail": True},
     "ak47":     {"color": (255, 215,  50), "size": 5,  "glow": (255, 180,  20), "trail": False},
+    # NEW
+    "cannon":   {"color": (220,  60,  40), "size": 9,  "glow": (255, 100,  60), "trail": True},
+    "phantom":  {"color": (160, 200, 255), "size": 8,  "glow": (120, 160, 255), "trail": True},
+    "bomb":     {"color": ( 60,  60,  20), "size": 12, "glow": (100, 100,  30), "trail": False},
 }
-
-# Bullet trail memory
-bullet_trails = {}  # bullet_id -> [(x,y), ...]
 
 # ─── SHARED STATE ─────────────────────────────────────────────────────────────
 server_players    = {}
 server_bullets    = []
 server_walls      = []
+server_dyn_walls  = []   # dynamic walls from server
 
 phase      = "startup"
 phase_lock = threading.Lock()
@@ -883,9 +988,10 @@ def check_startup():
 
 # ─── NETWORK ──────────────────────────────────────────────────────────────────
 prev_hp = {}
+prev_bomb_bullets = set()  # track bomb bullet ids to detect explosions
 
 def receive():
-    global server_players, server_bullets, server_walls
+    global server_players, server_bullets, server_walls, server_dyn_walls
     global lobby_data, winner_name, was_kicked, spectate_msg
     global ready_local, prev_hp
 
@@ -905,8 +1011,6 @@ def receive():
             elif p_msg == "lobby":
                 lobby_data = msg
                 cur = get_phase()
-                if cur in ("dead_screen", "brawler_select"):
-                    pass
 
             elif p_msg == "lobby_spectate":
                 spectate_msg = msg.get("msg", "")
@@ -922,31 +1026,25 @@ def receive():
 
             elif p_msg == "running":
                 new_players = msg.get("players", {})
-                # Detect hits for particles
                 for addr, p in new_players.items():
                     old_hp = prev_hp.get(addr, 100)
                     new_hp = p.get("hp", 100)
                     if new_hp < old_hp and p.get("alive", True):
-                        # Update hurt flash
                         anim = get_anim(addr)
                         anim["hurt_t"] = 10
                         play_sound("hit")
                     prev_hp[addr] = new_hp
 
                 prev_alive = {addr: p.get("alive", True) for addr, p in server_players.items()}
-                server_players = new_players
-                server_bullets = msg.get("bullets", [])
-                server_walls   = msg.get("walls", [])
+                server_players  = new_players
+                server_bullets  = msg.get("bullets", [])
+                server_walls    = msg.get("walls", [])
+                server_dyn_walls = msg.get("dynamic_walls", [])
 
                 for addr, p in server_players.items():
                     if addr in prev_alive and prev_alive[addr] and not p.get("alive", True):
                         if p.get("name") == my_name:
                             play_sound("death")
-                        # Spawn death particles
-                        anim = get_anim(addr)
-                        bname = WEAPON_TO_BRAWLER.get(p.get("weapon", ""), "sniper")
-                        bdata = BRAWLERS.get(bname, BRAWLERS["sniper"])
-                        # Will be drawn in world coords - approximate
 
                 cur = get_phase()
                 if cur == "playing":
@@ -985,22 +1083,43 @@ def send_ready(state):
 starpower_active   = False
 starpower_start    = 0
 starpower_duration = 5000
-starpower_cooldown = 10000
-last_starpower     = -10000
+starpower_cooldown = 12000
+last_starpower     = -20000
 last_shot          = 0
 
 def activate_starpower():
     global starpower_active, starpower_start, last_starpower
     now = pygame.time.get_ticks()
-    if now - last_starpower > starpower_cooldown:
-        starpower_active = True
-        starpower_start  = now
-        last_starpower   = now
-        send({"type": "starpower", "brawler": my_brawler, "active": True})
+    if now - last_starpower < starpower_cooldown:
+        return
+
+    # Get current aim direction
+    my_wx, my_wy = get_my_pos()
+    mx_s, my_s = pygame.mouse.get_pos()
+    twx, twy = screen_to_world(mx_s, my_s)
+    ang = math.atan2(twy - my_wy, twx - my_wx)
+    dx = math.cos(ang)
+    dy = math.sin(ang)
+
+    starpower_active = True
+    starpower_start  = now
+    last_starpower   = now
+    send({"type": "starpower", "brawler": my_brawler, "active": True, "dx": dx, "dy": dy})
+
+    # Instant-use abilities — auto-deactivate locally
+    if my_brawler in ("tank", "ninja"):
+        starpower_active = False
 
 def update_starpower():
     global starpower_active
-    if starpower_active and pygame.time.get_ticks() - starpower_start > starpower_duration:
+    if not starpower_active:
+        return
+    now = pygame.time.get_ticks()
+    # Duration-based for mage/healer/berserker/ghost/bomber
+    if my_brawler in ("tank", "ninja"):
+        starpower_active = False
+        return
+    if now - starpower_start > starpower_duration:
         starpower_active = False
         send({"type": "starpower", "brawler": my_brawler, "active": False})
 
@@ -1052,33 +1171,27 @@ def draw_startup():
     screen.fill((0, 0, 0))
     now = pygame.time.get_ticks()
     elapsed = now - startup_start
-
     pulse = int(8 + 6 * math.sin(elapsed * 0.003))
     bg_surf = pygame.Surface((SCREEN_W, SCREEN_H))
     bg_surf.fill((pulse, pulse//2, 0))
     screen.blit(bg_surf, (0, 0))
-
     for i in range(5):
         r = int(50 + i * 80 + (elapsed * 0.06) % 400)
         a = max(0, 120 - i * 22 - int((elapsed * 0.06) % 400) // 4)
         s = pygame.Surface((r*2, r*2), pygame.SRCALPHA)
         pygame.draw.circle(s, (255, 200, 30, a), (r, r), r, 2)
         screen.blit(s, (SCREEN_W//2 - r, SCREEN_H//2 - r))
-
     alpha = min(255, int(elapsed / 1200 * 255))
     alpha = min(alpha, max(0, int((4500 - elapsed) / 600 * 255)))
-
     for dx2, dy2 in [(-3,0),(3,0),(0,-3),(0,3)]:
         s = font_huge.render(GAME_TITLE, True, (40, 20, 0))
         tmp = pygame.Surface(s.get_size(), pygame.SRCALPHA)
         tmp.blit(s, (0, 0)); tmp.set_alpha(alpha)
         screen.blit(tmp, (SCREEN_W//2 - s.get_width()//2 + dx2, SCREEN_H//2 - s.get_height()//2 + dy2))
-
     s = font_huge.render(GAME_TITLE, True, C_ACCENT)
     tmp = pygame.Surface(s.get_size(), pygame.SRCALPHA)
     tmp.blit(s, (0, 0)); tmp.set_alpha(alpha)
     screen.blit(tmp, (SCREEN_W//2 - s.get_width()//2, SCREEN_H//2 - s.get_height()//2))
-
     if elapsed > 1500:
         sub_a = min(255, int((elapsed - 1500) / 800 * 255))
         sub_a = min(sub_a, alpha)
@@ -1102,14 +1215,11 @@ def draw_name_entry():
         pygame.draw.line(banner, (10, 12, 30, a), (0, i), (SCREEN_W, i))
     screen.blit(banner, (0, 0))
     pygame.draw.line(screen, C_ACCENT, (0, banner_h), (SCREEN_W, banner_h), 2)
-
     shake = int(2 * math.sin(t * 3))
     centered(GAME_TITLE, font_big, C_ACCENT, 22 + shake)
     centered("SELECT YOUR NAME", font_small, C_GRAY, 82)
-
-    brawler_names = list(BRAWLERS.keys())
-    spacing = min(180, (SCREEN_W - 40) // len(brawler_names))
-    total_w = spacing * len(brawler_names)
+    spacing = min(180, (SCREEN_W - 40) // len(BRAWLERS))
+    total_w = spacing * len(BRAWLERS)
     start_x = cx - total_w // 2 + spacing // 2
     for i, (bname, bdata) in enumerate(BRAWLERS.items()):
         bx = start_x + i * spacing
@@ -1121,7 +1231,6 @@ def draw_name_entry():
         screen.blit(preview, (bx - 45, by + bob))
         s = font_tiny.render(bname.upper(), True, bdata["color"])
         screen.blit(s, (bx - s.get_width()//2, by + 78 + bob))
-
     panel_x = cx - 220
     draw_panel(screen, panel_x, 240, 440, 60, color=(16, 20, 36), border=C_BLUE, radius=12)
     cursor = "|" if (pygame.time.get_ticks()//500)%2 else " "
@@ -1132,7 +1241,6 @@ def draw_name_entry():
     else:
         s = font_med.render(disp, True, C_WHITE)
         screen.blit(s, (cx - s.get_width()//2, 253))
-
     if name_input.strip():
         draw_panel(screen, cx - 120, 320, 240, 46, color=(8, 28, 14), border=C_GREEN, radius=10)
         centered("PRESS ENTER  ▶", font_small, C_GREEN, 334)
@@ -1148,17 +1256,13 @@ def draw_lobby():
     draw_bg_grid()
     t = pygame.time.get_ticks() * 0.001
     draw_floating_stars(t)
-
     cx = SCREEN_W // 2
     now_ms = pygame.time.get_ticks()
     ld = lobby_data
-
     pygame.draw.rect(screen, (8, 10, 22), (0, 0, SCREEN_W, 80))
     pygame.draw.line(screen, C_ACCENT, (0, 80), (SCREEN_W, 80), 2)
-
     shake = int(1.5 * math.sin(t * 2.5))
     centered(GAME_TITLE, font_big, C_ACCENT, 8 + shake)
-
     game_running = ld.get("game_running", False)
     if game_running:
         status_txt = "⚔  GAME IN PROGRESS  —  Waiting for next round..."
@@ -1176,7 +1280,6 @@ def draw_lobby():
         else:
             status_txt = f"Ready up!  ({ready_c}/{total_a} ready)"
             status_col = C_ACCENT
-
     centered(status_txt, font_small, status_col, 52)
 
     left_w   = 260
@@ -1189,16 +1292,13 @@ def draw_lobby():
     panel_h  = SCREEN_H - panel_y - 10
 
     # ── LEFT: Player list ──
-    draw_panel(screen, left_x, panel_y, left_w, panel_h,
-               color=(12, 14, 26), border=(30, 36, 60), radius=12)
+    draw_panel(screen, left_x, panel_y, left_w, panel_h, color=(12, 14, 26), border=(30, 36, 60), radius=12)
     s = font_small.render("PLAYERS", True, C_ACCENT)
     screen.blit(s, (left_x + 14, panel_y + 14))
     lobby_ps = ld.get("lobby_players", [])
     pc = font_tiny.render(f"{len(lobby_ps)} / 10", True, C_GRAY)
     screen.blit(pc, (left_x + left_w - pc.get_width() - 12, panel_y + 17))
-    pygame.draw.line(screen, (30, 34, 60), (left_x + 10, panel_y + 40),
-                     (left_x + left_w - 10, panel_y + 40), 1)
-
+    pygame.draw.line(screen, (30, 34, 60), (left_x + 10, panel_y + 40), (left_x + left_w - 10, panel_y + 40), 1)
     for i, pdata in enumerate(lobby_ps[:10]):
         ry = panel_y + 50 + i * 52
         if ry + 50 > panel_y + panel_h - 6:
@@ -1208,21 +1308,16 @@ def draw_lobby():
         is_spec  = pdata.get("spectating", False)
         bname_p  = pdata.get("brawler", "sniper")
         bdata_p  = BRAWLERS.get(bname_p, BRAWLERS["sniper"])
-
         row_col = (20, 24, 48) if is_me else (14, 16, 34)
         row_bdr = bdata_p["color"] if is_me else (30, 34, 58)
         pygame.draw.rect(screen, row_col, (left_x + 6, ry, left_w - 12, 46), border_radius=8)
         pygame.draw.rect(screen, row_bdr, (left_x + 6, ry, left_w - 12, 46), 1, border_radius=8)
-
-        # Mini brawler portrait
         icon = pygame.Surface((54, 54), pygame.SRCALPHA)
         draw_brawler_detailed(icon, bname_p, 27, 32, scale=0.9, face_angle=20)
         screen.blit(icon, (left_x + 6, ry - 4))
-
         nc = C_ACCENT if is_me else C_WHITE
         ns = font_tiny.render(pdata.get("name", "?"), True, nc)
         screen.blit(ns, (left_x + 62, ry + 6))
-
         if is_spec:
             tag_col, tag_txt = C_GRAY, "SPECTATING"
         elif is_ready:
@@ -1233,10 +1328,8 @@ def draw_lobby():
         screen.blit(ts, (left_x + 62, ry + 26))
 
     # ── CENTER: Brawler selection ──
-    draw_panel(screen, center_x, panel_y, center_w, panel_h,
-               color=(10, 12, 24), border=(28, 32, 58), radius=12)
+    draw_panel(screen, center_x, panel_y, center_w, panel_h, color=(10, 12, 24), border=(28, 32, 58), radius=12)
     centered("CHOOSE YOUR BRAWLER", font_med, C_WHITE, panel_y + 16, x=center_x + center_w//2)
-
     brawler_names = list(BRAWLERS.keys())
     cols = min(len(brawler_names), 3)
     rows = math.ceil(len(brawler_names) / cols)
@@ -1244,7 +1337,6 @@ def draw_lobby():
     card_h = min(280, (panel_h - 60 - (rows-1)*10) // rows)
     cards_total_w = cols * card_w + (cols-1) * 10
     card_start_x  = center_x + (center_w - cards_total_w) // 2
-
     mx_now, my_now = pygame.mouse.get_pos()
     brawler_rects = {}
     hover_b       = None
@@ -1257,28 +1349,22 @@ def draw_lobby():
         card_y = panel_y + 52 + row_i * (card_h + 10)
         hov   = bx <= mx_now <= bx + card_w and card_y <= my_now <= card_y + card_h
         sel   = (selected_brawler == bname)
-
         if hov: hover_b = bname
         brawler_rects[bname] = (bx, card_y, card_w, card_h)
-
         if sel:
             bg_col, bdr_col, bdr_w = (28, 22, 50), bdata["color"], 3
         elif hov:
             bg_col, bdr_col, bdr_w = (22, 20, 44), bdata["accent"], 2
         else:
             bg_col, bdr_col, bdr_w = (14, 16, 32), (32, 36, 64), 1
-
         if sel:
             glow = pygame.Surface((card_w + 20, card_h + 20), pygame.SRCALPHA)
             gc   = bdata["color"]
             ga   = int(40 + 20 * math.sin(t * 3))
             pygame.draw.rect(glow, (*gc, ga), (0, 0, card_w+20, card_h+20), border_radius=14)
             screen.blit(glow, (bx - 10, card_y - 10))
-
         pygame.draw.rect(screen, bg_col,  (bx, card_y, card_w, card_h), border_radius=12)
         pygame.draw.rect(screen, bdr_col, (bx, card_y, card_w, card_h), bdr_w, border_radius=12)
-
-        # Detailed brawler art in card
         bob_amt = int(5 * math.sin(t * 2 + idx * 1.1)) if (hov or sel) else 0
         art_size = 110
         art = pygame.Surface((art_size, art_size + 10), pygame.SRCALPHA)
@@ -1287,30 +1373,24 @@ def draw_lobby():
                               scale=2.0, starpower=sel, face_angle=face_ang,
                               walk_phase=t * 3 if (hov or sel) else 0)
         screen.blit(art, (bx + card_w//2 - art_size//2, card_y + 8 + bob_amt))
-
         tag_s = font_tiny.render(bdata["tag"], True, bdata["color"])
         tb_x  = bx + card_w//2 - tag_s.get_width()//2 - 4
         pygame.draw.rect(screen, (10, 8, 20), (tb_x, card_y + 106, tag_s.get_width()+8, 18), border_radius=3)
         screen.blit(tag_s, (tb_x + 4, card_y + 107))
-
         ns = font_small.render(bname.upper(), True, bdata["color"] if (hov or sel) else C_WHITE)
         screen.blit(ns, (bx + card_w//2 - ns.get_width()//2, card_y + 126))
-
         pygame.draw.line(screen, (28, 32, 60), (bx + 10, card_y + 148), (bx + card_w - 10, card_y + 148), 1)
-
         for j, (lbl, val) in enumerate(bdata["stat_labels"]):
             ls = font_tiny.render(lbl, True, C_GRAY)
             vs = font_tiny.render(val, True, C_WHITE)
             screen.blit(ls, (bx + 10, card_y + 155 + j*20))
             screen.blit(vs, (bx + card_w - vs.get_width() - 10, card_y + 155 + j*20))
-
         desc_y = card_y + 155 + 3*20 + 4
         pygame.draw.line(screen, (28, 32, 60), (bx + 10, desc_y), (bx + card_w - 10, desc_y), 1)
         ds = font_tiny.render(bdata["desc"], True, C_GRAY)
         screen.blit(ds, (bx + card_w//2 - ds.get_width()//2, desc_y + 4))
         star_s = font_tiny.render("★ " + bdata["star"], True, C_ACCENT)
         screen.blit(star_s, (bx + card_w//2 - star_s.get_width()//2, desc_y + 20))
-
         if sel:
             sel_s = font_tiny.render("✓ SELECTED", True, C_GREEN)
             screen.blit(sel_s, (bx + card_w//2 - sel_s.get_width()//2, card_y + card_h - 18))
@@ -1318,16 +1398,13 @@ def draw_lobby():
     lobby_hover_brawler = hover_b
 
     # ── RIGHT: Ready panel ──
-    draw_panel(screen, right_x, panel_y, right_w, panel_h,
-               color=(10, 12, 24), border=(28, 32, 58), radius=12)
-
+    draw_panel(screen, right_x, panel_y, right_w, panel_h, color=(10, 12, 24), border=(28, 32, 58), radius=12)
     art2 = pygame.Surface((110, 120), pygame.SRCALPHA)
     face_ang2 = 15 + math.sin(t * 0.5) * 10
     draw_brawler_detailed(art2, selected_brawler, 55, 65, scale=2.2,
                           starpower=ready_local, face_angle=face_ang2,
                           walk_phase=t * 2 if ready_local else 0)
     screen.blit(art2, (right_x + right_w//2 - 55, panel_y + 10))
-
     cur_bdata = BRAWLERS.get(selected_brawler, BRAWLERS["sniper"])
     bname_s = font_med.render(selected_brawler.upper(), True, cur_bdata["color"])
     screen.blit(bname_s, (right_x + right_w//2 - bname_s.get_width()//2, panel_y + 118))
@@ -1339,7 +1416,6 @@ def draw_lobby():
 
     spec_self = any(lp.get("name") == my_name and lp.get("spectating", False)
                     for lp in lobby_data.get("lobby_players", []))
-
     if spec_self or game_running:
         centered("SPECTATING", font_med, C_GRAY, panel_y + 148, x=right_x + right_w//2)
         centered("Waiting for next round", font_tiny, (90, 95, 110), panel_y + 173, x=right_x + right_w//2)
@@ -1353,24 +1429,19 @@ def draw_lobby():
     btn_w   = right_w - 28
     btn_h   = 52
     btn_hov = btn_x <= mx_now <= btn_x + btn_w and btn_y <= my_now <= btn_y + btn_h
-
     if ready_local:
         btn_col, btn_bdr, btn_txt, btn_tc = (8, 38, 16), C_GREEN, "✓  READY!", C_GREEN
     else:
         pulse_b = int(40 * math.sin(now_ms * 0.005))
         btn_col = (28 + pulse_b//4, 24, 8)
         btn_bdr, btn_txt, btn_tc = C_ACCENT, "READY UP  ▶", C_ACCENT
-
     if btn_hov:
         btn_col = tuple(min(255, c + 15) for c in btn_col)
-
     pygame.draw.rect(screen, btn_col, (btn_x, btn_y, btn_w, btn_h), border_radius=12)
     pygame.draw.rect(screen, btn_bdr, (btn_x, btn_y, btn_w, btn_h), 2, border_radius=12)
     bs = font_med.render(btn_txt, True, btn_tc)
     screen.blit(bs, (btn_x + btn_w//2 - bs.get_width()//2, btn_y + btn_h//2 - bs.get_height()//2))
-
-    pygame.draw.line(screen, (24, 28, 50), (right_x + 12, panel_y + 218),
-                     (right_x + right_w - 12, panel_y + 218), 1)
+    pygame.draw.line(screen, (24, 28, 50), (right_x + 12, panel_y + 218), (right_x + right_w - 12, panel_y + 218), 1)
     rc   = ld.get("ready_count", 0)
     ta   = max(1, ld.get("total_active", 1))
     prog = rc / ta
@@ -1380,18 +1451,14 @@ def draw_lobby():
     pygame.draw.rect(screen, C_GREEN,      (bar_bx, panel_y + 226, int(bar_bw * prog), 12), border_radius=6)
     prog_s = font_tiny.render(f"{rc}/{ta} ready", True, C_GRAY)
     screen.blit(prog_s, (right_x + right_w//2 - prog_s.get_width()//2, panel_y + 242))
-
     if ta < 2:
         need_s = font_tiny.render("Need 2+ players", True, (90, 80, 50))
         screen.blit(need_s, (right_x + right_w//2 - need_s.get_width()//2, panel_y + 260))
-
-    pygame.draw.line(screen, (24, 28, 50), (right_x + 12, panel_y + panel_h - 60),
-                     (right_x + right_w - 12, panel_y + panel_h - 60), 1)
+    pygame.draw.line(screen, (24, 28, 50), (right_x + 12, panel_y + panel_h - 60), (right_x + right_w - 12, panel_y + panel_h - 60), 1)
     me_s = font_tiny.render(f"You:  {my_name}", True, C_BLUE)
     screen.blit(me_s, (right_x + right_w//2 - me_s.get_width()//2, panel_y + panel_h - 50))
     tip_s = font_tiny.render("ESC to quit", True, (50, 55, 75))
     screen.blit(tip_s, (right_x + right_w//2 - tip_s.get_width()//2, panel_y + panel_h - 28))
-
     return brawler_rects
 
 # ─── SCREEN: DEAD ─────────────────────────────────────────────────────────────
@@ -1400,22 +1467,18 @@ def draw_dead_screen():
     ov = pygame.Surface((SCREEN_W, SCREEN_H), pygame.SRCALPHA)
     ov.fill((0, 0, 0, 160))
     screen.blit(ov, (0, 0))
-
     t  = pygame.time.get_ticks() * 0.001
     cy = SCREEN_H // 2 - 90
     skull_bob = int(8 * math.sin(t * 2))
     skull_s = font_huge.render("💀", True, C_RED)
     screen.blit(skull_s, (SCREEN_W//2 - skull_s.get_width()//2, cy + skull_bob))
-
     centered("YOU  DIED", font_big, C_RED, cy + 90)
     pygame.draw.line(screen, (80, 20, 20), (SCREEN_W//2 - 200, cy + 148), (SCREEN_W//2 + 200, cy + 148), 1)
     centered("Spectating until the round ends...", font_small, C_GRAY, cy + 160)
     centered("You'll return to the lobby when it's over.", font_small, (75, 78, 98), cy + 192)
-
     alive_ps = [p for p in server_players.values() if p.get("alive", True) and not p.get("spectating", False)]
     if alive_ps:
-        centered(f"⚔  {len(alive_ps)} player{'s' if len(alive_ps)>1 else ''} still fighting...",
-                 font_small, C_ACCENT, cy + 232)
+        centered(f"⚔  {len(alive_ps)} player{'s' if len(alive_ps)>1 else ''} still fighting...", font_small, C_ACCENT, cy + 232)
     else:
         centered("Round ending...", font_small, C_GREEN, cy + 232)
 
@@ -1428,23 +1491,19 @@ def draw_game_over():
     draw_floating_stars(t)
     cx = SCREEN_W // 2
     cy = SCREEN_H // 2 - 160
-
     now_ms = pygame.time.get_ticks()
     trophy_bob = int(10 * math.sin(t * 2))
     trophy_s = font_huge.render("🏆", True, C_ACCENT)
     screen.blit(trophy_s, (cx - trophy_s.get_width()//2, cy + trophy_bob))
-
     centered("ROUND  OVER!", font_big, C_ACCENT, cy + 80)
     pygame.draw.line(screen, (60, 50, 10), (cx - 240, cy + 130), (cx + 240, cy + 130), 1)
     centered("WINNER", font_small, C_GRAY, cy + 142)
     centered(winner_name, font_big, C_GREEN, cy + 166)
-
     elapsed = now_ms - go_timer if go_timer else 0
     bw = int(480 * min(elapsed / 4000, 1.0))
     pygame.draw.rect(screen, (20, 24, 40), (cx - 240, cy + 240, 480, 18), border_radius=9)
     pygame.draw.rect(screen, C_ACCENT,     (cx - 240, cy + 240, bw,  18), border_radius=9)
     centered("Returning to lobby...", font_small, C_GRAY, cy + 268)
-
     if elapsed < 200 and elapsed > 10:
         for _ in range(3):
             px2 = cx + ((_ * 120) - 120)
@@ -1452,7 +1511,6 @@ def draw_game_over():
     update_draw_particles(screen)
 
 # ─── TILE MAP GRAPHICS ────────────────────────────────────────────────────────
-# Pre-generate tile textures
 _tile_cache = {}
 
 def get_tile_surface(tile_type, size=48):
@@ -1462,7 +1520,6 @@ def get_tile_surface(tile_type, size=48):
     s = pygame.Surface((size, size))
     if tile_type == "grass_a":
         s.fill((58, 90, 42))
-        # Random grass tufts
         for _ in range(4):
             gx = random.randint(4, size-4)
             gy = random.randint(4, size-4)
@@ -1483,7 +1540,6 @@ def get_tile_surface(tile_type, size=48):
     _tile_cache[key] = s
     return s
 
-# Pre-seeded tile pattern
 random.seed(42)
 TILE_PATTERN = [[random.choice(["grass_a", "grass_a", "grass_b"]) for _ in range(MAP_W // 48 + 2)]
                 for _ in range(MAP_H // 48 + 2)]
@@ -1494,22 +1550,18 @@ def draw_ground_tiles():
     off_y = int(cam_y % tile)
     base_tx = int(cam_x // tile)
     base_ty = int(cam_y // tile)
-
     for ix in range(-1, SCREEN_W // tile + 2):
         for iy in range(-1, SCREEN_H // tile + 2):
             tx = base_tx + ix
             ty = base_ty + iy
             if tx < 0 or ty < 0 or tx >= len(TILE_PATTERN[0]) or ty >= len(TILE_PATTERN):
-                # Void
-                pygame.draw.rect(screen, (15, 20, 12),
-                                 (ix*tile - off_x, iy*tile - off_y, tile, tile))
+                pygame.draw.rect(screen, (15, 20, 12), (ix*tile - off_x, iy*tile - off_y, tile, tile))
             else:
                 tile_type = TILE_PATTERN[ty][tx]
                 t_surf = get_tile_surface(tile_type, tile)
                 screen.blit(t_surf, (ix*tile - off_x, iy*tile - off_y))
 
-# ─── REALISTIC BUSH DRAWING ───────────────────────────────────────────────────
-# Pre-generate bush surfaces
+# ─── BUSH DRAWING ─────────────────────────────────────────────────────────────
 _bush_cache = {}
 
 def get_bush_surface(r, front=False):
@@ -1519,39 +1571,26 @@ def get_bush_surface(r, front=False):
     size = r * 2 + 16
     s = pygame.Surface((size, size), pygame.SRCALPHA)
     cx = cy = size // 2
-
     if not front:
-        # Shadow under bush
         sh = pygame.Surface((r*2 + 4, r + 6), pygame.SRCALPHA)
         pygame.draw.ellipse(sh, (0, 0, 0, 40), (0, 0, r*2+4, r+6))
         s.blit(sh, (cx - r - 2, cy + r//2))
-        # Base dark green blob
         pygame.draw.circle(s, (20, 60, 15, 220), (cx, cy), r)
-        # Mid green
         pygame.draw.circle(s, (35, 85, 25, 220), (cx, cy - r//5), int(r * 0.85))
     else:
-        # Front layer - brighter, more detailed
-        # Main bush cluster
         for i in range(5):
             ang = math.pi * 2 / 5 * i + 0.3
             ox2 = int(math.cos(ang) * r * 0.4)
             oy2 = int(math.sin(ang) * r * 0.3)
             pygame.draw.circle(s, (45, 110, 30, 215), (cx + ox2, cy + oy2), int(r * 0.6))
-
-        # Top bright highlight
         pygame.draw.circle(s, (65, 140, 40, 200), (cx, cy - r//3), int(r * 0.5))
         pygame.draw.circle(s, (80, 160, 50, 180), (cx - r//5, cy - r//2), int(r * 0.3))
-
-        # Small leaf details
         for i in range(8):
             ang = math.pi * 2 / 8 * i
             lx = cx + int(math.cos(ang) * r * 0.7)
             ly = cy + int(math.sin(ang) * r * 0.65)
             pygame.draw.circle(s, (55, 125, 35, 190), (lx, ly), max(3, r // 5))
-
-        # Bright top specular
         pygame.draw.circle(s, (90, 170, 55, 140), (cx - r//6, cy - r//2), r // 4)
-
     _bush_cache[key] = s
     return s
 
@@ -1579,42 +1618,85 @@ def draw_wall_detailed(w, wx2, wy2):
     key = (ww, wh)
     if key not in _wall_cache:
         s = pygame.Surface((ww + 8, wh + 8), pygame.SRCALPHA)
-        # Drop shadow
         pygame.draw.rect(s, (0, 0, 0, 60), (4, 6, ww, wh), border_radius=4)
-        # Stone base
         pygame.draw.rect(s, (90, 85, 100), (0, 0, ww, wh), border_radius=4)
-        # Lighter face
         pygame.draw.rect(s, (115, 110, 128), (0, 0, ww, wh - 4), border_radius=4)
-        # Top highlight
         pygame.draw.rect(s, (140, 135, 155), (2, 2, ww - 4, max(4, wh // 4)), border_radius=3)
-
-        # Stone brick lines
         if ww > 40:
             brick_h = max(12, wh // 2)
             for row in range(0, wh, brick_h):
                 offset = (row // brick_h % 2) * (ww // 3)
                 for bx_start in range(-offset, ww, ww // 3):
                     if 0 < bx_start + ww // 3 < ww:
-                        pygame.draw.line(s, (70, 65, 82),
-                                         (bx_start + ww // 3, row + 2),
-                                         (bx_start + ww // 3, min(wh - 2, row + brick_h - 2)), 1)
+                        pygame.draw.line(s, (70, 65, 82), (bx_start + ww // 3, row + 2), (bx_start + ww // 3, min(wh - 2, row + brick_h - 2)), 1)
                 pygame.draw.line(s, (70, 65, 82), (2, row + brick_h), (ww - 2, row + brick_h), 1)
-
-        # Moss patches
         for i in range(max(1, ww // 40)):
             mx2 = int(ww * (0.2 + 0.6 * i / max(1, ww // 40 - 1))) if ww // 40 > 1 else ww // 2
             pygame.draw.circle(s, (50, 100, 40, 120), (mx2, wh - 4), max(3, ww // 20))
-
-        # Outline
         pygame.draw.rect(s, (50, 45, 60), (0, 0, ww, wh), 2, border_radius=4)
         _wall_cache[key] = s
-
     screen.blit(_wall_cache[key], (wx2 - 4, wy2 - 2))
+
+def draw_dynamic_wall(dw):
+    """Draw a tank-placed wall with an HP bar above it."""
+    sx, sy = world_to_screen(dw["x"], dw["y"])
+    ww, wh = dw["w"], dw["h"]
+
+    if sx + ww < -20 or sx > SCREEN_W + 20 or sy + wh < -20 or sy > SCREEN_H + 20:
+        return
+
+    hp_pct = max(0, dw["hp"] / dw["max_hp"])
+
+    # Tint the wall orange/yellow to distinguish from static walls
+    surf = pygame.Surface((ww + 8, wh + 8), pygame.SRCALPHA)
+    # Shadow
+    pygame.draw.rect(surf, (0, 0, 0, 60), (4, 6, ww, wh), border_radius=4)
+    # Base — warm brown/orange stone
+    base_col = (160, 120, 60)
+    mid_col  = (180, 140, 80)
+    top_col  = (200, 165, 100)
+    pygame.draw.rect(surf, base_col, (0, 0, ww, wh), border_radius=4)
+    pygame.draw.rect(surf, mid_col,  (0, 0, ww, wh - 4), border_radius=4)
+    pygame.draw.rect(surf, top_col,  (2, 2, ww - 4, max(4, wh // 4)), border_radius=3)
+    # Crack lines based on damage
+    if hp_pct < 0.75:
+        crack_col = (80, 55, 20, int(200 * (1 - hp_pct)))
+        pygame.draw.line(surf, crack_col, (ww//3, 2), (ww//4, wh - 2), 2)
+    if hp_pct < 0.4:
+        pygame.draw.line(surf, crack_col, (ww*2//3, 2), (ww*3//4, wh - 2), 2)
+        pygame.draw.line(surf, crack_col, (ww//2, wh//3), (ww//3, wh*2//3), 1)
+    # Outline — orange glow
+    glow_a = int(180 + 60 * math.sin(pygame.time.get_ticks() * 0.004))
+    pygame.draw.rect(surf, (255, 180, 40, glow_a), (0, 0, ww, wh), 2, border_radius=4)
+    screen.blit(surf, (sx - 4, sy - 2))
+
+    # ── HP bar above the wall ──
+    bar_w  = ww
+    bar_h  = 8
+    bar_x  = sx
+    bar_y  = sy - 16
+    # Background
+    pygame.draw.rect(screen, (30, 10, 10), (bar_x - 1, bar_y - 1, bar_w + 2, bar_h + 2), border_radius=3)
+    pygame.draw.rect(screen, (60, 20, 20), (bar_x, bar_y, bar_w, bar_h), border_radius=2)
+    # Fill
+    fill_w = int(bar_w * hp_pct)
+    if fill_w > 0:
+        hp_col = C_GREEN if hp_pct > 0.5 else (C_ACCENT if hp_pct > 0.25 else C_RED)
+        pygame.draw.rect(screen, hp_col, (bar_x, bar_y, fill_w, bar_h), border_radius=2)
+        # Shine
+        pygame.draw.rect(screen, tuple(min(255, c + 60) for c in hp_col),
+                         (bar_x, bar_y, fill_w, 3), border_radius=2)
+    # HP text
+    hp_txt = font_tiny.render(f"{int(dw['hp'])}/{dw['max_hp']}", True, C_WHITE)
+    screen.blit(hp_txt, (bar_x + bar_w//2 - hp_txt.get_width()//2, bar_y - 14))
+
+    # Owner label
+    owner_txt = font_tiny.render(f"🧱 {dw.get('owner_name','')}", True, (220, 180, 80))
+    screen.blit(owner_txt, (bar_x + bar_w//2 - owner_txt.get_width()//2, bar_y + bar_h + 2))
 
 # ─── MAP BORDER ───────────────────────────────────────────────────────────────
 def draw_map_border():
     bx2, by2 = world_to_screen(0, 0)
-    # Void areas
     if bx2 > 0:
         pygame.draw.rect(screen, (6, 6, 10), (0, 0, bx2, SCREEN_H))
     if by2 > 0:
@@ -1625,11 +1707,8 @@ def draw_map_border():
     bottom = by2 + MAP_H
     if bottom < SCREEN_H:
         pygame.draw.rect(screen, (6, 6, 10), (0, bottom, SCREEN_W, SCREEN_H - bottom))
-
-    # Thick decorative border
     for thickness, col in [(6, (60, 40, 20)), (4, (140, 100, 40)), (2, (200, 160, 60))]:
-        pygame.draw.rect(screen, col, (bx2 - thickness, by2 - thickness,
-                                       MAP_W + thickness*2, MAP_H + thickness*2), thickness)
+        pygame.draw.rect(screen, col, (bx2 - thickness, by2 - thickness, MAP_W + thickness*2, MAP_H + thickness*2), thickness)
 
 # ─── CROSSHAIR ────────────────────────────────────────────────────────────────
 def draw_crosshair(mxp, myp, color):
@@ -1657,14 +1736,11 @@ def try_shoot():
     mx_s, my_s   = pygame.mouse.get_pos()
     twx, twy = screen_to_world(mx_s, my_s)
     ang = math.atan2(twy - my_wy, twx - my_wx)
-
     now = pygame.time.get_ticks()
     if now - last_shot < 50:
         return
     last_shot = now
     play_sound("shoot")
-
-    # Update local shoot flash
     my_addr = None
     for addr, p in server_players.items():
         if p.get("name") == my_name:
@@ -1674,30 +1750,45 @@ def try_shoot():
         anim = get_anim(my_addr)
         anim["shoot_flash"] = 8
         anim["face_dir"] = math.degrees(ang)
+    send({"type": "shoot", "dx": math.cos(ang), "dy": math.sin(ang)})
 
-    send({
-        "type": "shoot",
-        "dx":   math.cos(ang),
-        "dy":   math.sin(ang),
-    })
+# ─── AoE EXPLOSION VISUAL ─────────────────────────────────────────────────────
+# Track bombs to detect when they disappear (explode)
+prev_bomb_set = set()
 
 def draw_game():
-    # Draw ground tiles
-    draw_ground_tiles()
+    global prev_bomb_set
 
+    draw_ground_tiles()
     update_starpower()
     draw_map_border()
 
-    # Walls
+    # Static walls
     for w in server_walls:
         wx2, wy2 = world_to_screen(w["x"], w["y"])
         if wx2 + w["w"] < -8 or wx2 > SCREEN_W + 8 or wy2 + w["h"] < -8 or wy2 > SCREEN_H + 8:
             continue
         draw_wall_detailed(w, wx2, wy2)
 
+    # Dynamic walls (tank walls) — draw before bushes so they're behind characters
+    for dw in server_dyn_walls:
+        draw_dynamic_wall(dw)
+
     draw_bushes_back()
 
-    # Sort players by y position for correct depth rendering
+    # Detect bomb explosions: bomb bullet that disappeared = exploded
+    cur_bomb_set = set()
+    for b in server_bullets:
+        if b.get("is_bomb"):
+            bid = (round(b["x"]), round(b["y"]))
+            cur_bomb_set.add(bid)
+    for old_bomb in prev_bomb_set:
+        if old_bomb not in cur_bomb_set:
+            # It exploded — spawn visual
+            bsx, bsy = world_to_screen(old_bomb[0], old_bomb[1])
+            spawn_explosion_particles(bsx, bsy, radius=80)
+    prev_bomb_set = cur_bomb_set
+
     sorted_players = sorted(server_players.items(), key=lambda kv: kv[1].get("y", 0))
 
     for addr, p in sorted_players:
@@ -1709,6 +1800,9 @@ def draw_game():
         sp_on    = p.get("starpower", False)
         alive    = p.get("alive", True)
         spec     = p.get("spectating", False)
+        invincible = p.get("invincible", False)
+        rage     = p.get("rage", False)
+        wallpierce = p.get("wallpierce", False)
 
         if spec and not is_me:
             continue
@@ -1726,7 +1820,6 @@ def draw_game():
         else:
             alpha = 255
 
-        # Update animation state
         anim = get_anim(addr)
         dx_move = px_w - anim["last_x"]
         dy_move = py_w - anim["last_y"]
@@ -1737,7 +1830,6 @@ def draw_game():
         anim["last_x"] = px_w
         anim["last_y"] = py_w
 
-        # Face direction toward mouse for own player
         if is_me:
             mx_s, my_s = pygame.mouse.get_pos()
             twx, twy = screen_to_world(mx_s, my_s)
@@ -1747,8 +1839,9 @@ def draw_game():
             anim["shoot_flash"] -= 1
         if anim["hurt_t"] > 0:
             anim["hurt_t"] -= 1
+        if anim.get("teleport_flash", 0) > 0:
+            anim["teleport_flash"] -= 1
 
-        # Draw shadow
         sh = pygame.Surface((36, 12), pygame.SRCALPHA)
         pygame.draw.ellipse(sh, (0, 0, 0, 60), (0, 0, 36, 12))
         screen.blit(sh, (px - 18, py + 16))
@@ -1762,9 +1855,12 @@ def draw_game():
             walk_phase=anim["walk_t"],
             shoot_flash=anim["shoot_flash"],
             hurt_flash=anim["hurt_t"],
+            invincible=invincible,
+            rage=rage,
+            wallpierce=wallpierce,
+            teleport_flash=anim.get("teleport_flash", 0),
         )
 
-        # Selection ring for own player
         if is_me and my_brawler:
             ring = pygame.Surface((42, 42), pygame.SRCALPHA)
             rc2  = BRAWLERS[my_brawler]["color"]
@@ -1776,7 +1872,6 @@ def draw_game():
         if not alive:
             continue
 
-        # Name tag
         nc = C_ACCENT if is_me else C_WHITE
         ns_sh = font_tiny.render(p.get("name","?"), True, C_DARK)
         ns    = font_tiny.render(p.get("name","?"), True, nc)
@@ -1784,22 +1879,20 @@ def draw_game():
         screen.blit(ns_sh, (px - ns.get_width()//2 + 1, name_y + 1))
         screen.blit(ns,    (px - ns.get_width()//2,   name_y))
 
-        # HP bar with fancy style
         hp_pct = max(0, p["hp"] / 100)
         hp_col = C_GREEN if hp_pct > 0.5 else (C_ACCENT if hp_pct > 0.25 else C_RED)
+        # Healer invincible — golden bar
+        if invincible:
+            hp_col = (255, 215, 0)
         bar_w3 = 40
         bar_x3 = px - bar_w3 // 2
         bar_y3 = py - 30
-        # Background
         pygame.draw.rect(screen, (20, 8, 8),  (bar_x3 - 1, bar_y3 - 1, bar_w3 + 2, 7), border_radius=3)
         pygame.draw.rect(screen, (40, 15, 15),  (bar_x3, bar_y3, bar_w3, 5), border_radius=2)
-        # Fill
         fill_w = int(bar_w3 * hp_pct)
         if fill_w > 0:
             pygame.draw.rect(screen, hp_col, (bar_x3, bar_y3, fill_w, 5), border_radius=2)
-            # Shine
-            pygame.draw.rect(screen, tuple(min(255, c + 60) for c in hp_col),
-                             (bar_x3, bar_y3, fill_w, 2), border_radius=2)
+            pygame.draw.rect(screen, tuple(min(255, c + 60) for c in hp_col), (bar_x3, bar_y3, fill_w, 2), border_radius=2)
 
         if sp_on and is_me:
             now_t3 = pygame.time.get_ticks()
@@ -1809,17 +1902,60 @@ def draw_game():
             pygame.draw.circle(gs, (*sc2, 50), (gr+3, gr+3), gr)
             screen.blit(gs, (px - gr - 3, py - gr - 3))
 
-    # ── Bullets with glow and trails ──
+    # ── Bullets ──
     for b in server_bullets:
         bx2, by2 = world_to_screen(int(b["x"]), int(b["y"]))
         if bx2 < -30 or bx2 > SCREEN_W + 30 or by2 < -30 or by2 > SCREEN_H + 30:
             continue
         style = BULLET_STYLE.get(b.get("weapon", "ak47"), BULLET_STYLE["ak47"])
         pierce = b.get("pierce", False)
+        wall_p = b.get("wall_pierce", False)
         col  = (255, 80, 80) if pierce else style["color"]
+        if wall_p:
+            col = tuple(min(255, c + 80) for c in col)
         size = style["size"]
 
-        # Trail
+        # Bomb special drawing — dark round bomb with fuse
+        if b.get("is_bomb"):
+            bomb_r = size
+            is_mega = b.get("aoe_radius", 100) > 100
+            if is_mega:
+                bomb_r = int(size * 1.5)
+                # Big glow
+                gs_b = pygame.Surface((bomb_r*4, bomb_r*4), pygame.SRCALPHA)
+                pygame.draw.circle(gs_b, (255, 150, 20, 60), (bomb_r*2, bomb_r*2), bomb_r*2)
+                screen.blit(gs_b, (bx2 - bomb_r*2, by2 - bomb_r*2))
+            pygame.draw.circle(screen, (20, 20, 5), (bx2, by2), bomb_r + 2)
+            pygame.draw.circle(screen, (50, 50, 10), (bx2, by2), bomb_r)
+            # Fuse spark
+            now_fuse = pygame.time.get_ticks()
+            fuse_ang = now_fuse * 0.008
+            fx = bx2 + int(math.cos(fuse_ang) * bomb_r)
+            fy = by2 - bomb_r + int(math.sin(fuse_ang) * bomb_r * 0.3)
+            pygame.draw.line(screen, (140, 100, 20), (bx2, by2 - bomb_r), (fx, fy), 2)
+            spark_a = int(150 + 100 * math.sin(now_fuse * 0.02))
+            pygame.draw.circle(screen, (255, 200, 50), (fx, fy), 3)
+            continue
+
+        # Ghost slow orb special
+        if b.get("weapon") == "phantom":
+            orb_r = size
+            now_orb = pygame.time.get_ticks()
+            # Pulsing slow orb
+            pulse_r = int(orb_r + 3 * math.sin(now_orb * 0.01))
+            gs_orb = pygame.Surface((pulse_r*4, pulse_r*4), pygame.SRCALPHA)
+            pygame.draw.circle(gs_orb, (100, 140, 255, 50), (pulse_r*2, pulse_r*2), pulse_r*2)
+            screen.blit(gs_orb, (bx2 - pulse_r*2, by2 - pulse_r*2))
+            pygame.draw.circle(screen, (200, 220, 255), (bx2, by2), orb_r + 2, 2)
+            pygame.draw.circle(screen, col, (bx2, by2), orb_r)
+            # Snowflake-like slow indicator
+            for si in range(6):
+                s_ang = math.pi / 3 * si + now_orb * 0.002
+                sx_sp = bx2 + int(math.cos(s_ang) * orb_r)
+                sy_sp = by2 + int(math.sin(s_ang) * orb_r)
+                pygame.draw.line(screen, (200, 220, 255), (bx2, by2), (sx_sp, sy_sp), 1)
+            continue
+
         if style.get("trail"):
             trail_len = 3
             dx_t = b.get("dx", 0)
@@ -1833,25 +1969,18 @@ def draw_game():
                 pygame.draw.circle(ts2, (*col, ta2), (tr2, tr2), tr2)
                 screen.blit(ts2, (trail_x - tr2, trail_y - tr2))
 
-        # Glow aura
         glow_r = size + 5
         gs3 = pygame.Surface((glow_r*2 + 4, glow_r*2 + 4), pygame.SRCALPHA)
         gcol = style["glow"]
         pygame.draw.circle(gs3, (*gcol, 70), (glow_r+2, glow_r+2), glow_r)
         pygame.draw.circle(gs3, (*gcol, 100), (glow_r+2, glow_r+2), glow_r - 2)
         screen.blit(gs3, (bx2 - glow_r - 2, by2 - glow_r - 2))
-
-        # Core
         pygame.draw.circle(screen, (255, 255, 255), (bx2, by2), max(2, size - 3))
         pygame.draw.circle(screen, col, (bx2, by2), size)
 
     draw_bushes_front()
-
-    # Particles over front bushes
     update_draw_particles(screen)
-
     draw_hud()
-
     mxp, myp = pygame.mouse.get_pos()
     ch_col = BRAWLERS[my_brawler]["color"] if my_brawler else C_WHITE
     draw_crosshair(mxp, myp, ch_col)
@@ -1863,15 +1992,37 @@ def draw_hud():
     cxh   = SCREEN_W // 2
 
     # Brawler info panel
-    draw_panel(screen, 6, 6, 230, 68, color=(10,12,22), border=(32,36,58))
+    draw_panel(screen, 6, 6, 260, 68, color=(10,12,22), border=(32,36,58))
     badge = pygame.Surface((68, 68), pygame.SRCALPHA)
     draw_brawler_detailed(badge, my_brawler, 34, 38, scale=1.2,
                           face_angle=20, walk_phase=pygame.time.get_ticks() * 0.002)
     screen.blit(badge, (6, 2))
     s1 = font_small.render(my_brawler.upper(), True, bdata["color"])
     screen.blit(s1, (76, 12))
-    s2 = font_tiny.render("[F] Starpower | ESC quit", True, C_GRAY)
+    s2 = font_tiny.render("[F] Starpower: " + bdata["star"], True, C_GRAY)
     screen.blit(s2, (76, 36))
+
+    # Active ability status indicators
+    my_p = None
+    for addr, p in server_players.items():
+        if p.get("name") == my_name:
+            my_p = p
+            break
+
+    if my_p:
+        status_items = []
+        if my_p.get("invincible"):
+            status_items.append(("🛡 INVINCIBLE", (100, 220, 255)))
+        if my_p.get("rage"):
+            status_items.append(("⚡ RAGE!", (255, 80, 20)))
+        if my_p.get("wallpierce"):
+            status_items.append(("👻 PHASE", (140, 180, 255)))
+        for si, (txt, col) in enumerate(status_items):
+            ts = font_small.render(txt, True, col)
+            ax = SCREEN_W - ts.get_width() - 12
+            ay = SCREEN_H - 80 - si * 28
+            pygame.draw.rect(screen, (8, 10, 20), (ax - 6, ay - 3, ts.get_width() + 12, 24), border_radius=6)
+            screen.blit(ts, (ax, ay))
 
     # Minimap
     mm_w, mm_h = 192, 108
@@ -1881,14 +2032,19 @@ def draw_hud():
     scale_y = mm_h / MAP_H
     draw_panel(screen, mm_x-3, mm_y-3, mm_w+6, mm_h+6, color=(8,10,18), border=(30,34,55), radius=5)
     pygame.draw.rect(screen, (40, 60, 30), (mm_x, mm_y, mm_w, mm_h))
-    # Walls on minimap
     for w in server_walls:
         wx2 = mm_x + int(w["x"] * scale_x)
         wy2 = mm_y + int(w["y"] * scale_y)
         ww2 = max(2, int(w["w"] * scale_x))
         wh2 = max(2, int(w["h"] * scale_y))
         pygame.draw.rect(screen, (100, 95, 115), (wx2, wy2, ww2, wh2))
-    # Players on minimap
+    # Dynamic walls on minimap
+    for dw in server_dyn_walls:
+        dwx = mm_x + int(dw["x"] * scale_x)
+        dwy = mm_y + int(dw["y"] * scale_y)
+        dww = max(2, int(dw["w"] * scale_x))
+        dwh = max(2, int(dw["h"] * scale_y))
+        pygame.draw.rect(screen, (220, 160, 60), (dwx, dwy, dww, dwh))
     for addr, p in server_players.items():
         mmx = mm_x + int(p["x"] * scale_x)
         mmy = mm_y + int(p["y"] * scale_y)
@@ -1898,7 +2054,6 @@ def draw_hud():
         r_mm = 4 if is_me2 else 3
         pygame.draw.circle(screen, (0,0,0), (mmx, mmy), r_mm + 1)
         pygame.draw.circle(screen, col, (mmx, mmy), r_mm)
-    # Camera rect
     vx = mm_x + int(cam_x * scale_x)
     vy = mm_y + int(cam_y * scale_y)
     vw = max(1, int(SCREEN_W * scale_x))
@@ -1909,26 +2064,33 @@ def draw_hud():
     bar_w2 = 340
     bx3, by3, bh3 = cxh - bar_w2//2, SCREEN_H - 36, 22
     draw_panel(screen, bx3-3, by3-3, bar_w2+6, bh3+6, color=(8,10,18), border=(30,34,55), radius=7)
+
+    # Get SP cooldown from server
+    sp_cd_left = 0.0
+    if my_p:
+        sp_cd_left = float(my_p.get("sp_cd_left", 0.0))
+
     if starpower_active:
         elapsed2 = now_ms - starpower_start
-        progress = 1.0 - min(elapsed2/starpower_duration, 1.0)
+        progress = 1.0 - min(elapsed2 / starpower_duration, 1.0)
         col2  = bdata["color"]
         label = "STARPOWER  ACTIVE"
         pulse2 = int(bar_w2 * progress)
         pygame.draw.rect(screen, (18,8,38), (bx3, by3, bar_w2, bh3), border_radius=5)
-        pygame.draw.rect(screen, col2, (bx3, by3, pulse2, bh3), border_radius=5)
-        shim = pygame.Surface((max(1,pulse2), bh3), pygame.SRCALPHA)
-        sa   = int(55 + 35*math.sin(now_ms*0.012))
+        if pulse2 > 0:
+            pygame.draw.rect(screen, col2, (bx3, by3, pulse2, bh3), border_radius=5)
+        shim = pygame.Surface((max(1, pulse2), bh3), pygame.SRCALPHA)
+        sa = int(55 + 35*math.sin(now_ms*0.012))
         pygame.draw.rect(shim, (255,255,255,sa), (0,0,max(1,pulse2),bh3//2))
         screen.blit(shim, (bx3, by3))
-    elif now_ms - last_starpower < starpower_cooldown:
-        elapsed2 = now_ms - last_starpower
-        progress = elapsed2 / starpower_cooldown
+    elif sp_cd_left > 0.1:
+        # Show cooldown based on server-reported remaining time
+        progress = 1.0 - (sp_cd_left / 12.0)
         col2  = C_GRAY
-        secs_left = int((starpower_cooldown - elapsed2)/1000)+1
+        secs_left = int(sp_cd_left) + 1
         label = f"COOLDOWN  {secs_left}s"
         pygame.draw.rect(screen, (18,18,28), (bx3, by3, bar_w2, bh3), border_radius=5)
-        pygame.draw.rect(screen, col2, (bx3, by3, int(bar_w2*progress), bh3), border_radius=5)
+        pygame.draw.rect(screen, col2, (bx3, by3, int(bar_w2 * progress), bh3), border_radius=5)
     else:
         col2  = C_ACCENT
         label = "STARPOWER  READY  [F]"
@@ -1936,6 +2098,7 @@ def draw_hud():
         pygame.draw.rect(screen, (28,24,8) if blink else (18,18,10), (bx3, by3, bar_w2, bh3), border_radius=5)
         if blink:
             pygame.draw.rect(screen, col2, (bx3, by3, bar_w2, bh3), border_radius=5)
+
     ls = font_tiny.render(label, True, col2)
     screen.blit(ls, (cxh - ls.get_width()//2, by3+4))
 
@@ -1995,7 +2158,6 @@ while running:
                             send_brawler_select(bname)
                             spawn_particles(mx_e, my_e, BRAWLERS[bname]["color"], count=10, speed=5)
                         break
-
                 right_x = SCREEN_W - 240 - 10
                 right_w_btn = 240
                 panel_y_btn = 92
@@ -2003,18 +2165,15 @@ while running:
                 btn_x = right_x + 14
                 btn_w_sz = right_w_btn - 28
                 btn_h_sz = 52
-
                 spec_self2   = any(lp.get("name") == my_name and lp.get("spectating", False)
                                    for lp in lobby_data.get("lobby_players", []))
                 game_running2 = lobby_data.get("game_running", False)
-
                 if not was_kicked and not spec_self2 and not game_running2:
                     if btn_x <= mx_e <= btn_x + btn_w_sz and btn_y <= my_e <= btn_y + btn_h_sz:
                         ready_local = not ready_local
                         send_ready(ready_local)
                         if ready_local:
-                            spawn_particles(btn_x + btn_w_sz//2, btn_y + btn_h_sz//2,
-                                            C_GREEN, count=12, speed=4)
+                            spawn_particles(btn_x + btn_w_sz//2, btn_y + btn_h_sz//2, C_GREEN, count=12, speed=4)
 
         elif cur_phase == "playing":
             if event.type == pygame.KEYDOWN and event.key == pygame.K_f:
@@ -2025,11 +2184,9 @@ while running:
             if event.type == pygame.MOUSEBUTTONUP and event.button == 1:
                 mouse_held = False
 
-    # Hold-to-shoot
     if cur_phase == "playing" and mouse_held:
         try_shoot()
 
-    # Movement
     if cur_phase == "playing":
         keys = pygame.key.get_pressed()
         send({"type": "move",
@@ -2038,7 +2195,6 @@ while running:
               "left":  bool(keys[pygame.K_a]),
               "right": bool(keys[pygame.K_d])})
 
-    # Game over auto-return
     if cur_phase == "game_over":
         if go_timer == 0:
             go_timer = pygame.time.get_ticks()
@@ -2050,7 +2206,6 @@ while running:
             set_phase("lobby")
             join_lobby()
 
-    # Lobby heartbeat
     if cur_phase == "lobby":
         now_ms_hb = pygame.time.get_ticks()
         if now_ms_hb - getattr(draw_lobby, "_last_hb", 0) > 1000:
@@ -2071,6 +2226,3 @@ while running:
 
 pygame.mouse.set_visible(True)
 pygame.quit()
-
-
-
