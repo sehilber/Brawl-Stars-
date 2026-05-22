@@ -28,6 +28,7 @@ BRAWLER_STATS = {
         "pierce":       False,
         "spread":       0,
         "spread_angle": 0,
+        "range":        900,   # max bullet travel distance in pixels
     },
     "minigun": {
         "weapon":       "minigun",
@@ -37,6 +38,7 @@ BRAWLER_STATS = {
         "pierce":       False,
         "spread":       0,
         "spread_angle": 0,
+        "range":        380,
     },
     "mage": {
         "weapon":       "magic",
@@ -46,6 +48,7 @@ BRAWLER_STATS = {
         "pierce":       False,
         "spread":       0,
         "spread_angle": 0,
+        "range":        520,
     },
     "tank": {
         "weapon":       "shotgun",
@@ -55,6 +58,7 @@ BRAWLER_STATS = {
         "pierce":       False,
         "spread":       4,
         "spread_angle": 15,
+        "range":        260,
     },
     "ninja": {
         "weapon":       "shuriken",
@@ -64,6 +68,7 @@ BRAWLER_STATS = {
         "pierce":       False,
         "spread":       0,
         "spread_angle": 0,
+        "range":        450,
     },
     "healer": {
         "weapon":       "orb",
@@ -73,8 +78,8 @@ BRAWLER_STATS = {
         "pierce":       False,
         "spread":       0,
         "spread_angle": 0,
+        "range":        480,
     },
-    # ── NEW BRAWLERS ──────────────────────────────────────────────────────────
     "berserker": {
         "weapon":       "cannon",
         "damage":       55,
@@ -83,24 +88,27 @@ BRAWLER_STATS = {
         "pierce":       False,
         "spread":       2,
         "spread_angle": 10,
+        "range":        320,
     },
     "ghost": {
         "weapon":       "phantom",
         "damage":       30,
-        "bullet_speed": 8,    # slow orbs
+        "bullet_speed": 8,
         "cooldown":     0.6,
         "pierce":       False,
         "spread":       0,
         "spread_angle": 0,
+        "range":        400,
     },
     "bomber": {
         "weapon":       "bomb",
-        "damage":       45,   # per-explosion; AOE hits multiple targets
+        "damage":       45,
         "bullet_speed": 12,
         "cooldown":     1.2,
         "pierce":       False,
         "spread":       0,
         "spread_angle": 0,
+        "range":        350,
     },
 }
 
@@ -116,14 +124,20 @@ BRAWLER_SPEED = {
     "bomber":    4,
 }
 
+# ─── REGENERATION CONFIG ─────────────────────────────────────────────────────
+# Time after last hit before regen starts (seconds)
+REGEN_DELAY      = 3.0
+# HP regenerated per second
+REGEN_RATE       = 8.0
+# Regen tick interval
+REGEN_TICK       = 0.1
+
 # ─── GAME STATE ───────────────────────────────────────────────────────────────
 game_phase   = "lobby"
 players      = {}
 bullets      = []
 kicked_names = set()
 
-# Dynamic walls: placed by tank starpower. Each entry:
-# { x, y, w, h, hp, max_hp, owner_name, id }
 dynamic_walls = []
 _dwall_id_counter = 0
 
@@ -241,22 +255,20 @@ def new_player(name="Player", spawn=None, brawler="sniper"):
         "spectating": False,
         "in_game": False,
         "last_heal_tick": time.time(),
-        # ability cooldowns
         "sp_cooldown_end": 0.0,
-        # invincibility (healer)
         "invincible_until": 0.0,
-        # berserker rage (speed + dmg boost)
         "rage_until": 0.0,
-        # ghost wall-pierce until
         "wallpierce_until": 0.0,
-        # face direction (sent from client via shoot dx/dy)
         "face_dx": 1.0,
         "face_dy": 0.0,
+        # ── Regen state ──
+        "last_hit_time": 0.0,       # timestamp of last damage taken
+        "regen_accumulator": 0.0,   # fractional HP accumulator for smooth regen
+        "slow_until": 0.0,
     }
 
 # ─── WALL HELPERS ─────────────────────────────────────────────────────────────
 def all_walls():
-    """All static + dynamic walls combined."""
     return list(MAP_WALLS) + [dw for dw in dynamic_walls]
 
 def collide_wall(x, y, r=PLAYER_RADIUS, wall_list=None):
@@ -283,46 +295,21 @@ def bullet_hits_wall(bx, by, wall_list=None):
 def bullet_out_of_bounds(bx, by):
     return bx < 0 or bx > MAP_W or by < 0 or by > MAP_H
 
-def spawn_bullet(p, addr, dx, dy, stats, pierce_override=False, wall_pierce=False,
-                 dmg_override=None, speed_override=None):
-    bullets.append({
-        "x":          p["x"],
-        "y":          p["y"],
-        "dx":         dx,
-        "dy":         dy,
-        "speed":      speed_override if speed_override is not None else stats["bullet_speed"],
-        "damage":     dmg_override if dmg_override is not None else stats["damage"],
-        "owner":      str(addr),
-        "pierce":     pierce_override or stats["pierce"],
-        "wall_pierce": wall_pierce,
-        "weapon":     stats["weapon"],
-        # for ghost slow effect
-        "slow":       stats.get("slow", False),
-        # for bomb AOE
-        "is_bomb":    stats.get("is_bomb", False),
-        "aoe_radius": stats.get("aoe_radius", 0),
-    })
-
 # ─── TANK: PLACE DYNAMIC WALL ─────────────────────────────────────────────────
-TANK_WALL_W   = 120   # wall width
-TANK_WALL_H   = 24    # wall height (always thin)
-TANK_WALL_HP  = 150   # how much damage the wall can absorb
-TANK_WALL_DIST = 60   # how far in front of the player it spawns
-TANK_WALL_MAX_PER_PLAYER = 2   # max simultaneous walls per tank
+TANK_WALL_W   = 120
+TANK_WALL_H   = 24
+TANK_WALL_HP  = 150
+TANK_WALL_DIST = 60
+TANK_WALL_MAX_PER_PLAYER = 2
 
 def place_tank_wall(p):
     global _dwall_id_counter
     owner_name = p["name"]
-
-    # Count existing walls by this player
     existing = [dw for dw in dynamic_walls if dw.get("owner_name") == owner_name]
     if len(existing) >= TANK_WALL_MAX_PER_PLAYER:
-        # Remove oldest
         oldest = existing[0]
         if oldest in dynamic_walls:
             dynamic_walls.remove(oldest)
-
-    # Face direction from stored face vector
     fdx = p.get("face_dx", 1.0)
     fdy = p.get("face_dy", 0.0)
     length = math.hypot(fdx, fdy)
@@ -331,41 +318,24 @@ def place_tank_wall(p):
     else:
         fdx /= length
         fdy /= length
-
-    # Center of proposed wall, placed TANK_WALL_DIST in front
     cx = p["x"] + fdx * TANK_WALL_DIST
     cy = p["y"] + fdy * TANK_WALL_DIST
-
-    # Choose orientation: if mostly horizontal movement, wall is vertical; else horizontal
-    # Wall is perpendicular to aim direction
-    # We always make the wall perpendicular to face direction
-    # Perpendicular: (-fdy, fdx)
-    # Wall rectangle: its LONG axis is perpendicular to face dir
     wx = cx - TANK_WALL_W / 2
     wy = cy - TANK_WALL_H / 2
-
-    # Clamp to map
     wx = max(PLAYER_RADIUS, min(wx, MAP_W - TANK_WALL_W - PLAYER_RADIUS))
     wy = max(PLAYER_RADIUS, min(wy, MAP_H - TANK_WALL_H - PLAYER_RADIUS))
-
-    # Check overlap with existing static walls (rough AABB check)
-    proposed = {"x": wx, "y": wy, "w": TANK_WALL_W, "h": TANK_WALL_H}
     for sw in MAP_WALLS:
-        # AABB overlap check with margin
         margin = 10
         if (wx < sw["x"] + sw["w"] + margin and
             wx + TANK_WALL_W > sw["x"] - margin and
             wy < sw["y"] + sw["h"] + margin and
             wy + TANK_WALL_H > sw["y"] - margin):
-            # Overlap — push wall forward a bit more or skip
-            # Try offset to avoid overlap
             wx2 = wx + fdx * (TANK_WALL_W + 10)
             wy2 = wy + fdy * (TANK_WALL_H + 10)
             wx2 = max(PLAYER_RADIUS, min(wx2, MAP_W - TANK_WALL_W - PLAYER_RADIUS))
             wy2 = max(PLAYER_RADIUS, min(wy2, MAP_H - TANK_WALL_H - PLAYER_RADIUS))
             wx, wy = wx2, wy2
             break
-
     _dwall_id_counter += 1
     dw = {
         "x":          wx,
@@ -377,20 +347,19 @@ def place_tank_wall(p):
         "owner_name": owner_name,
         "id":         _dwall_id_counter,
         "is_dynamic": True,
-        "expires":    time.time() + 12.0,   # auto-expire after 12 seconds
+        "expires":    time.time() + 12.0,
     }
     dynamic_walls.append(dw)
     print(f"🧱 {owner_name} placed wall at ({int(wx)},{int(wy)})")
 
 # ─── GHOST: SLOW EFFECT ───────────────────────────────────────────────────────
-GHOST_SLOW_DURATION = 2.0   # seconds
-GHOST_SLOW_FACTOR   = 0.4   # multiplier on speed
+GHOST_SLOW_DURATION = 2.0
+GHOST_SLOW_FACTOR   = 0.4
 
 # ─── BOMBER: AOE EXPLOSION ────────────────────────────────────────────────────
-BOMB_AOE_RADIUS = 100  # pixels
+BOMB_AOE_RADIUS = 100
 
 def trigger_explosion(bx, by, damage, owner_addr, aoe_radius=BOMB_AOE_RADIUS):
-    """Deal AOE damage to all players within radius."""
     hit_any = False
     for addr, p in list(players.items()):
         if str(addr) == str(owner_addr):
@@ -399,12 +368,12 @@ def trigger_explosion(bx, by, damage, owner_addr, aoe_radius=BOMB_AOE_RADIUS):
             continue
         dist = math.hypot(p["x"] - bx, p["y"] - by)
         if dist < aoe_radius:
-            # Falloff: full damage at center, 50% at edge
             falloff = 1.0 - (dist / aoe_radius) * 0.5
             actual_dmg = int(damage * falloff)
             if time.time() < p.get("invincible_until", 0):
                 continue
             p["hp"] -= actual_dmg
+            p["last_hit_time"] = time.time()   # reset regen timer
             hit_any = True
             if p["hp"] <= 0:
                 p["alive"]      = False
@@ -461,14 +430,11 @@ def start_game():
     bullets.clear()
     dynamic_walls.clear()
     kicked_names.clear()
-
     participating = [(addr, p) for addr, p in players.items()
                      if not p.get("spectating", False)]
-
     for addr, p in players.items():
         p["in_game"]    = False
         p["spectating"] = False
-
     spawn_list = list(SPAWN_POINTS)
     for i, (addr, p) in enumerate(participating):
         sx, sy = spawn_list[i % len(spawn_list)]
@@ -494,7 +460,8 @@ def start_game():
         p["slow_until"]        = 0.0
         p["face_dx"]           = 1.0
         p["face_dy"]           = 0.0
-
+        p["last_hit_time"]     = 0.0
+        p["regen_accumulator"] = 0.0
     print(f"🎮 Game started with {len(participating)} players!")
     msg = json.dumps({"phase": "start"}).encode()
     for addr, p in players.items():
@@ -623,13 +590,10 @@ def handle():
         brawler = p.get("brawler", "sniper")
         stats   = BRAWLER_STATS.get(brawler, BRAWLER_STATS["sniper"])
         speed   = BRAWLER_SPEED.get(brawler, 5)
-
-        # Apply slow if affected
         now = time.time()
+
         if now < p.get("slow_until", 0):
             speed = max(1, int(speed * GHOST_SLOW_FACTOR))
-
-        # Berserker rage speed boost
         if brawler == "berserker" and now < p.get("rage_until", 0):
             speed = int(speed * 1.6)
 
@@ -651,34 +615,25 @@ def handle():
 
         elif msg.get("type") == "starpower":
             active = msg.get("active", False)
-            # Store face direction when activating
             raw_dx = msg.get("dx", p.get("face_dx", 1.0))
             raw_dy = msg.get("dy", p.get("face_dy", 0.0))
             length = math.hypot(raw_dx, raw_dy)
             if length > 0:
                 p["face_dx"] = raw_dx / length
                 p["face_dy"] = raw_dy / length
-
             sp_cd = p.get("sp_cooldown_end", 0)
             if now < sp_cd and active:
-                # Still on cooldown — ignore
                 continue
-
             p["starpower"] = active
-
             if active:
-                SP_COOLDOWN = 12.0  # seconds between uses
-
+                SP_COOLDOWN = 12.0
                 if brawler == "mage":
                     p["invisible"] = True
-
                 elif brawler == "tank":
                     place_tank_wall(p)
                     p["starpower"] = False
                     p["sp_cooldown_end"] = now + SP_COOLDOWN
-
                 elif brawler == "ninja":
-                    # Teleport forward
                     TELEPORT_DIST = 160
                     fdx = p.get("face_dx", 1.0)
                     fdy = p.get("face_dy", 0.0)
@@ -690,7 +645,6 @@ def handle():
                         p["x"] = tx
                         p["y"] = ty
                     else:
-                        # Try smaller hops
                         for step in [120, 80, 40]:
                             tx2 = p["x"] + fdx * step
                             ty2 = p["y"] + fdy * step
@@ -701,29 +655,19 @@ def handle():
                                 break
                     p["starpower"] = False
                     p["sp_cooldown_end"] = now + SP_COOLDOWN
-
                 elif brawler == "healer":
-                    # Invincibility for 3 seconds
                     p["invincible_until"] = now + 3.0
                     p["sp_cooldown_end"]  = now + SP_COOLDOWN
-
                 elif brawler == "berserker":
-                    # Rage: speed + damage boost for 4 seconds
                     p["rage_until"]      = now + 4.0
                     p["sp_cooldown_end"] = now + SP_COOLDOWN
-
                 elif brawler == "ghost":
-                    # All shots pierce walls for 4 seconds
                     p["wallpierce_until"] = now + 4.0
                     p["sp_cooldown_end"]  = now + SP_COOLDOWN
-
                 elif brawler == "bomber":
-                    # Bigger explosions for next 3 shots handled in shoot via flag
                     p["mega_bomb_shots"]  = 3
                     p["sp_cooldown_end"]  = now + SP_COOLDOWN
-
             else:
-                # Deactivate
                 if brawler == "mage":
                     p["invisible"] = False
 
@@ -735,7 +679,6 @@ def handle():
             if shoot_now - p["last_shot"] < cd:
                 continue
             p["last_shot"] = shoot_now
-
             raw_dx = msg.get("dx", 0)
             raw_dy = msg.get("dy", 0)
             length = math.hypot(raw_dx, raw_dy)
@@ -743,23 +686,15 @@ def handle():
                 continue
             dx_n = raw_dx / length
             dy_n = raw_dy / length
-
-            # Store face direction
             p["face_dx"] = dx_n
             p["face_dy"] = dy_n
-
             pierce = stats["pierce"]
             if brawler == "sniper" and p.get("starpower"):
                 pierce = True
-
             wall_pierce = shoot_now < p.get("wallpierce_until", 0)
-
-            # Rage damage boost
             dmg = stats["damage"]
             if brawler == "berserker" and shoot_now < p.get("rage_until", 0):
                 dmg = int(dmg * 1.5)
-
-            # Mega bomb
             aoe_r = BOMB_AOE_RADIUS
             if brawler == "bomber" and p.get("mega_bomb_shots", 0) > 0:
                 aoe_r = int(BOMB_AOE_RADIUS * 1.8)
@@ -767,9 +702,11 @@ def handle():
                 p["mega_bomb_shots"] -= 1
                 if p["mega_bomb_shots"] <= 0:
                     p["starpower"] = False
-
-            # Ghost slow flag
             slow_bullet = (brawler == "ghost")
+            bullet_range = stats.get("range", 600)
+            # Sniper range doubles with starpower
+            if brawler == "sniper" and p.get("starpower"):
+                bullet_range = int(bullet_range * 1.5)
 
             spread_count = stats["spread"]
             if spread_count > 0:
@@ -793,6 +730,10 @@ def handle():
                         "slow":       slow_bullet,
                         "is_bomb":    (brawler == "bomber"),
                         "aoe_radius": aoe_r,
+                        "range":      bullet_range,
+                        "traveled":   0.0,
+                        "spawn_x":    p["x"],
+                        "spawn_y":    p["y"],
                     }
                     bullets.append(b_entry)
             else:
@@ -810,6 +751,10 @@ def handle():
                     "slow":       slow_bullet,
                     "is_bomb":    (brawler == "bomber"),
                     "aoe_radius": aoe_r,
+                    "range":      bullet_range,
+                    "traveled":   0.0,
+                    "spawn_x":    p["x"],
+                    "spawn_y":    p["y"],
                 }
                 bullets.append(b_entry)
 
@@ -825,6 +770,8 @@ def check_inactive_players():
         time.sleep(2)
 
 def game_loop():
+    last_regen_tick = time.time()
+
     while True:
         if game_phase == "running":
             now = time.time()
@@ -844,6 +791,30 @@ def game_loop():
                         p["hp"] = min(100, p["hp"] + regen)
                         p["last_heal_tick"] = now
 
+            # ── Universal HP Regeneration (Brawl Stars style) ─────────────────
+            # Runs every REGEN_TICK seconds
+            if now - last_regen_tick >= REGEN_TICK:
+                last_regen_tick = now
+                for addr, p in players.items():
+                    if not p["alive"] or p.get("spectating", False):
+                        continue
+                    if p["hp"] >= 100:
+                        p["regen_accumulator"] = 0.0
+                        continue
+                    # Don't regen if recently hit or is healer (has own system)
+                    time_since_hit = now - p.get("last_hit_time", 0.0)
+                    if time_since_hit < REGEN_DELAY:
+                        p["regen_accumulator"] = 0.0
+                        continue
+                    if p.get("brawler") == "healer":
+                        continue   # healer uses its own regen above
+                    # Accumulate fractional HP
+                    p["regen_accumulator"] += REGEN_RATE * REGEN_TICK
+                    regen_int = int(p["regen_accumulator"])
+                    if regen_int >= 1:
+                        p["hp"] = min(100, p["hp"] + regen_int)
+                        p["regen_accumulator"] -= regen_int
+
             # ── Auto-deactivate starpowers ────────────────────────────────────
             for addr, p in players.items():
                 b = p.get("brawler")
@@ -862,23 +833,33 @@ def game_loop():
             walls_now  = all_walls()
 
             for b in bullets[:]:
-                b["x"] += b["dx"] * b["speed"]
-                b["y"] += b["dy"] * b["speed"]
+                step_dist = b["speed"]
+                b["x"] += b["dx"] * step_dist
+                b["y"] += b["dy"] * step_dist
+                b["traveled"] = b.get("traveled", 0.0) + step_dist
+
+                # Range check — remove bullet if it exceeded its max range
+                if b["traveled"] >= b.get("range", 99999):
+                    # For bombs, trigger a faded explosion at range limit
+                    if b.get("is_bomb"):
+                        trigger_explosion(b["x"], b["y"], b["damage"] // 2,
+                                          b["owner"], aoe_radius=b.get("aoe_radius", BOMB_AOE_RADIUS))
+                    if b in bullets:
+                        bullets.remove(b)
+                    continue
 
                 if bullet_out_of_bounds(b["x"], b["y"]):
                     if b in bullets:
                         bullets.remove(b)
                     continue
 
-                # Wall collision (skip if wall_pierce)
+                # Wall collision
                 if not b.get("wall_pierce", False):
                     hit_wall = bullet_hits_wall(b["x"], b["y"], wall_list=walls_now)
                     if hit_wall:
                         if b.get("is_bomb"):
-                            # Explode on wall contact
                             trigger_explosion(b["x"], b["y"], b["damage"], b["owner"],
                                               aoe_radius=b.get("aoe_radius", BOMB_AOE_RADIUS))
-                        # Damage dynamic wall if it has hp
                         if hit_wall.get("is_dynamic"):
                             hit_wall["hp"] -= b["damage"]
                             if hit_wall["hp"] <= 0 and hit_wall in dynamic_walls:
@@ -896,12 +877,9 @@ def game_loop():
                     if p.get("spectating", False):
                         continue
                     if math.hypot(p["x"] - b["x"], p["y"] - b["y"]) < HIT_RADIUS:
-                        # Healer invincibility check
                         if now < p.get("invincible_until", 0):
-                            # Bullet passes through
                             if not b.get("pierce"):
                                 hit_player = True
-                                # Don't remove bullet — it bounces off? No, just remove:
                                 break
                             continue
 
@@ -910,8 +888,9 @@ def game_loop():
                                               aoe_radius=b.get("aoe_radius", BOMB_AOE_RADIUS))
                         else:
                             p["hp"] -= b["damage"]
+                            p["last_hit_time"] = now      # reset regen delay
+                            p["regen_accumulator"] = 0.0  # clear accumulator
 
-                        # Ghost slow
                         if b.get("slow"):
                             p["slow_until"] = now + GHOST_SLOW_DURATION
 
@@ -929,22 +908,37 @@ def game_loop():
                     bullets.remove(b)
 
             # ── Broadcast game state ──────────────────────────────────────────
-            # Serialize players with extra state for client
             players_out = {}
             for addr, p in players.items():
                 entry = dict(p)
                 entry["invincible"] = now < p.get("invincible_until", 0)
                 entry["rage"]       = now < p.get("rage_until", 0)
                 entry["wallpierce"] = now < p.get("wallpierce_until", 0)
-                # SP cooldown remaining (0 = ready)
                 sp_cd_left = max(0.0, p.get("sp_cooldown_end", 0) - now)
                 entry["sp_cd_left"] = round(sp_cd_left, 1)
+                # Time until regen starts (for client display)
+                time_since_hit = now - p.get("last_hit_time", 0.0)
+                regen_delay_left = max(0.0, REGEN_DELAY - time_since_hit)
+                entry["regen_delay_left"] = round(regen_delay_left, 2)
+                entry["is_regenning"] = (
+                    regen_delay_left <= 0.0 and
+                    p["hp"] < 100 and
+                    p["alive"] and
+                    not p.get("spectating", False) and
+                    p.get("brawler") != "healer"
+                )
                 players_out[str(addr)] = entry
+
+            # Only send range info in bullets (not spawn coords, save bandwidth)
+            bullets_out = []
+            for b in bullets:
+                bo = dict(b)
+                bullets_out.append(bo)
 
             state = json.dumps({
                 "phase":         "running",
                 "players":       players_out,
-                "bullets":       bullets,
+                "bullets":       bullets_out,
                 "walls":         MAP_WALLS,
                 "dynamic_walls": dynamic_walls,
             }).encode()
@@ -968,11 +962,11 @@ def server_console():
     print(f"  Map: {MAP_W}x{MAP_H}  |  Max players: {MAX_PLAYERS}")
     print(f"  Brawlers: {', '.join(BRAWLER_STATS.keys())}")
     print(f"  Hit radius: 24px | Player radius: {PLAYER_RADIUS}px")
-    print("  NOTE: All damage/speed values are server-authoritative.\n")
+    print(f"  Regen: {REGEN_RATE} HP/s after {REGEN_DELAY}s delay")
+    print("  NOTE: All damage/speed/range values are server-authoritative.\n")
 
     while True:
         cmd = input().strip().lower()
-
         if cmd == "":
             if game_phase == "lobby":
                 active = [p for p in players.values() if not p.get("spectating", False)]
@@ -985,7 +979,6 @@ def server_console():
                     start_game()
             else:
                 print("⚠️  Game already running.")
-
         elif cmd == "players":
             if not players:
                 print("  (no players)")
@@ -996,15 +989,13 @@ def server_console():
                 spec_tag  = " [SPECTATING]" if p.get("spectating") else ""
                 kick_tag  = " [KICKED]"     if p["name"] in kicked_names else ""
                 print(f"  {p['name']:15s} {p['brawler']:12s} {phase_tag:10s} {status}{ready_tag}{spec_tag}{kick_tag}  {addr}")
-
         elif cmd == "stats":
             print("\n  BRAWLER STATS (authoritative):")
             for bname, s in BRAWLER_STATS.items():
                 spd = BRAWLER_SPEED.get(bname, 5)
                 print(f"  {bname:12s}  dmg={s['damage']:3d}  bspd={s['bullet_speed']:3d}  "
-                      f"cd={s['cooldown']:.2f}s  move={spd}  spread={s['spread']}")
+                      f"cd={s['cooldown']:.2f}s  move={spd}  spread={s['spread']}  range={s['range']}")
             print()
-
         elif cmd.startswith("kick "):
             name = cmd[5:].strip()
             matches = [(a, p) for a, p in players.items() if p["name"].lower() == name.lower()]
@@ -1024,7 +1015,6 @@ def server_console():
                     check_round_end()
             else:
                 print(f"  Player '{name}' not found.")
-
         else:
             print("  Unknown command.")
 
@@ -1034,3 +1024,5 @@ threading.Thread(target=check_inactive_players, daemon=True).start()
 
 print("🚀 Server running on port", PORT)
 server_console()
+
+
